@@ -21,6 +21,7 @@ import { invalidateReasoningRoutingRuleCache } from "./reasoningRoutingRules";
 import { normalizeProviderSpecificData } from "@/lib/providers/requestDefaults";
 import { ensureCodexFingerprintSeed } from "@omniroute/open-sse/config/codexIdentity.ts";
 import { bumpProxyConfigGeneration, getSettings } from "./settings";
+import { publishConnectionCooldown, clearConnectionCooldown } from "./providers/connectionCooldownSync";
 import {
   getStoredManagementPassword,
   isBcryptHash,
@@ -892,6 +893,30 @@ export async function updateProviderConnection(id: string, data: JsonRecord) {
   backupDbFile("pre-write");
   invalidateDbCache("connections"); // Bust connections read cache
   bumpProxyConfigGeneration();
+  // Mirror cooldown-relevant fields to every other instance sharing this
+  // Redis (see providers/connectionCooldownSync.ts) — only when this write
+  // actually touched one of them, so an unrelated field edit (name,
+  // priority, etc.) doesn't publish a no-op. rateLimitedUntil explicitly
+  // set to null/undefined-but-present is a real clear (matches
+  // clearConnectionErrorIfUnchanged's local reset), everything else is a
+  // publish of the new state.
+  if (
+    "testStatus" in data ||
+    "rateLimitedUntil" in data ||
+    "lastErrorType" in data ||
+    "backoffLevel" in data
+  ) {
+    if ("rateLimitedUntil" in data && !data.rateLimitedUntil) {
+      clearConnectionCooldown(id);
+    } else {
+      publishConnectionCooldown(id, {
+        testStatus: (merged.testStatus as string | null) ?? null,
+        rateLimitedUntil: (merged.rateLimitedUntil as string | null) ?? null,
+        lastErrorType: (merged.lastErrorType as string | null) ?? null,
+        backoffLevel: (merged.backoffLevel as number | null) ?? null,
+      });
+    }
+  }
 
   if (data.priority !== undefined) {
     const existingRecord = toRecord(existing);

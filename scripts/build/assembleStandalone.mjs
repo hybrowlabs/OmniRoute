@@ -122,6 +122,77 @@ const EXTRA_MODULE_ENTRIES = [
     dest: ["node_modules", "wreq-js"],
   },
   {
+    // storeFactory.ts/redisQuotaStore.ts/rateLimiter.ts all deliberately load
+    // ioredis via a runtime-dynamic `await import("ioredis")` (see comment
+    // atop redisQuotaStore.ts: a static top-level import gets hoisted into a
+    // real esbuild external by the MCP bundle, which may not ship ioredis).
+    // Exactly like wreq-js above, that makes ioredis invisible to Next.js's
+    // standalone file tracer, so QUOTA_STORE_DRIVER=redis and any other
+    // dynamic ioredis consumer silently got only ioredis's package.json in
+    // the runtime image — never its real code — and every real Redis
+    // operation threw MODULE_NOT_FOUND at first use, falling through to
+    // SQLite (or, in the shared provider-connection-cooldown Redis helper's
+    // case, failing outright since it has no SQLite fallback path). Copy the
+    // whole module explicitly, same as wreq-js.
+    label: "ioredis (dynamic-import Redis client)",
+    src: ["node_modules", "ioredis"],
+    dest: ["node_modules", "ioredis"],
+  },
+  {
+    // ioredis's own real (non-dynamic) requires resolve these siblings from
+    // the flat top-level node_modules/ produced by npm — Next.js's tracer
+    // never walks into them because it never sees ioredis itself (dynamic
+    // import, see above), so they need the same explicit treatment.
+    label: "ioredis dependency: @ioredis/commands",
+    src: ["node_modules", "@ioredis", "commands"],
+    dest: ["node_modules", "@ioredis", "commands"],
+  },
+  {
+    label: "ioredis dependency: cluster-key-slot",
+    src: ["node_modules", "cluster-key-slot"],
+    dest: ["node_modules", "cluster-key-slot"],
+  },
+  {
+    label: "ioredis dependency: debug",
+    src: ["node_modules", "debug"],
+    dest: ["node_modules", "debug"],
+  },
+  {
+    label: "ioredis dependency: denque",
+    src: ["node_modules", "denque"],
+    dest: ["node_modules", "denque"],
+  },
+  {
+    label: "ioredis dependency: lodash.defaults",
+    src: ["node_modules", "lodash.defaults"],
+    dest: ["node_modules", "lodash.defaults"],
+  },
+  {
+    label: "ioredis dependency: lodash.isarguments",
+    src: ["node_modules", "lodash.isarguments"],
+    dest: ["node_modules", "lodash.isarguments"],
+  },
+  {
+    label: "ioredis dependency: ms",
+    src: ["node_modules", "ms"],
+    dest: ["node_modules", "ms"],
+  },
+  {
+    label: "ioredis dependency: redis-errors",
+    src: ["node_modules", "redis-errors"],
+    dest: ["node_modules", "redis-errors"],
+  },
+  {
+    label: "ioredis dependency: redis-parser",
+    src: ["node_modules", "redis-parser"],
+    dest: ["node_modules", "redis-parser"],
+  },
+  {
+    label: "ioredis dependency: standard-as-callback",
+    src: ["node_modules", "standard-as-callback"],
+    dest: ["node_modules", "standard-as-callback"],
+  },
+  {
     label: "@swc/helpers",
     src: ["node_modules", "@swc", "helpers"],
     dest: ["node_modules", "@swc", "helpers"],

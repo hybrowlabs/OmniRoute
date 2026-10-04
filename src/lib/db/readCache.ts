@@ -129,7 +129,15 @@ export async function getCachedRawProviderConnections(
   const cached = rawConnectionsCache.get(key);
   if (cached !== undefined) return cached;
   const { getRawProviderConnections } = await import("./providers");
-  const rows = await getRawProviderConnections(filter);
+  const { overlayCooldownState } = await import("./providers/connectionCooldownSync");
+  // Overlaid at cache-population time only (bounded by the same 5s TTL
+  // this cache already imposes on every other field) — see
+  // providers/connectionCooldownSync.ts for why: a cross-instance
+  // rate-limit/cooldown Redis knows about that this instance's own local
+  // SQLite row hasn't independently discovered yet.
+  const rows = await overlayCooldownState(
+    (await getRawProviderConnections(filter)) as Record<string, unknown>[]
+  );
   rawConnectionsCache.set(key, rows);
   return rows;
 }
