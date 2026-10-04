@@ -10,6 +10,7 @@
  * - Response path: TitleCase → lowercase (for clients expecting lowercase)
  */
 
+import { createHash } from "node:crypto";
 import { EXTRA_TOOL_RENAME_MAP } from "./claudeCodeExtraRemap.ts";
 
 const TOOL_RENAME_MAP: Record<string, string> = {
@@ -480,4 +481,85 @@ export function cloakThirdPartyToolNames(
   }
 
   return nameMap ?? new Map<string, string>();
+}
+
+/**
+ * Bound custom tool names at the Anthropic wire boundary. Keep client-visible
+ * names in the existing response map, including names already cloaked above.
+ */
+export function shortenClaudeToolNames(body: Record<string, unknown>): void {
+  const names = new Set<string>();
+  const collect = (name: unknown) => {
+    if (typeof name === "string") names.add(name);
+  };
+  const collectContent = (content: unknown) => {
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (block?.type === "tool_use") collect(block.name);
+      if (block?.type === "tool_reference") collect(block.tool_name);
+      if (block?.type === "tool_result") collectContent(block.content);
+    }
+  };
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) collect(tool?.name);
+  }
+  if (Array.isArray(body.messages)) {
+    for (const message of body.messages) collectContent(message?.content);
+  }
+  const choice = body.tool_choice as Record<string, unknown> | undefined;
+  if (choice?.type === "tool") collect(choice.name);
+
+  const longNames = [...names].filter((name) => name.length > 128).sort();
+  if (longNames.length === 0) return;
+
+  const responseMap = getRequestToolNameMap(body);
+  const used = new Set([...names, ...responseMap.keys()]);
+  const aliases = new Map<string, string>();
+  for (const name of longNames) {
+    const hash = createHash("sha256").update(name).digest("hex").slice(0, 16);
+    let suffix = `_${hash}`;
+    let alias = `${name.slice(0, 128 - suffix.length)}${suffix}`;
+    let collision = 0;
+    // Reserve unchanged names too: a client may already declare the exact
+    // hash-derived alias. Sorted assignment also makes list order irrelevant.
+    while (used.has(alias)) {
+      suffix = `_${hash}_${++collision}`;
+      alias = `${name.slice(0, 128 - suffix.length)}${suffix}`;
+    }
+    used.add(alias);
+    aliases.set(name, alias);
+    responseMap.set(alias, responseMap.get(name) ?? name);
+  }
+
+  const rename = (entry: Record<string, unknown>, key: string) => {
+    const name = entry?.[key];
+    const alias = typeof name === "string" ? aliases.get(name) : undefined;
+    return alias ? { ...entry, [key]: alias } : entry;
+  };
+  const rewriteContent = (content: unknown): unknown => {
+    if (!Array.isArray(content)) return content;
+    let rewritten: unknown[] | undefined;
+    for (let i = 0; i < content.length; i++) {
+      const block = content[i];
+      let next = block;
+      if (block?.type === "tool_use") next = rename(block, "name");
+      if (block?.type === "tool_reference") next = rename(block, "tool_name");
+      if (block?.type === "tool_result") {
+        const nested = rewriteContent(block.content);
+        if (nested !== block.content) next = { ...block, content: nested };
+      }
+      if (next !== block) (rewritten ??= content.slice())[i] = next;
+    }
+    return rewritten ?? content;
+  };
+  if (Array.isArray(body.tools)) {
+    body.tools = body.tools.map((tool) => rename(tool, "name"));
+  }
+  if (Array.isArray(body.messages)) {
+    body.messages = body.messages.map((message) => {
+      const content = rewriteContent(message?.content);
+      return content === message?.content ? message : { ...message, content };
+    });
+  }
+  if (choice?.type === "tool") body.tool_choice = rename(choice, "name");
 }
