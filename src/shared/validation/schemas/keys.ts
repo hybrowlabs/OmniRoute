@@ -98,6 +98,7 @@ export const updateKeyPermissionsSchema = z
     name: z.string().trim().min(1).max(200).optional(),
     modelAccessMode: z.enum(["all", "restricted"]).optional(),
     allowedModels: z.array(z.string().trim().min(1)).max(1000).optional(),
+    blockedModels: z.array(z.string().trim().min(1)).max(1000).optional(),
     allowedCombos: z.array(z.string().trim().min(1).max(200)).max(500).optional(),
     allowedConnections: z.array(z.string().uuid()).max(100).optional(),
     noLog: z.boolean().optional(),
@@ -142,6 +143,7 @@ export const updateKeyPermissionsSchema = z
       value.name === undefined &&
       value.modelAccessMode === undefined &&
       value.allowedModels === undefined &&
+      value.blockedModels === undefined &&
       value.allowedCombos === undefined &&
       value.allowedConnections === undefined &&
       value.noLog === undefined &&

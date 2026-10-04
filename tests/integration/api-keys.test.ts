@@ -453,6 +453,100 @@ test("PATCH /api/keys/[id] updates permissions and rejects invalid payloads", as
   assert.equal(missingKeyBody.error, "Key not found");
 });
 
+test("PATCH deny-list-only updates persist, survive unrelated edits, and can be cleared", async () => {
+  await enableManagementAuth();
+  const createdResponse = await listRoute.POST(
+    await makeManagementSessionRequest("http://localhost/api/keys", {
+      method: "POST",
+      body: { name: "Deny-list lifecycle" },
+    })
+  );
+  assert.equal(createdResponse.status, 201);
+  const created = (await createdResponse.json()) as { id: string; key: string };
+  const url = `http://localhost/api/keys/${created.id}`;
+  const params = { params: Promise.resolve({ id: created.id }) };
+  const patch = async (body: Record<string, unknown>) =>
+    keyRoute.PATCH(
+      await makeManagementSessionRequest(url, { method: "PATCH", body }),
+      params
+    );
+  const model = "claude/claude-opus-5-5";
+
+  assert.equal(await apiKeysDb.isModelAllowedForKey(created.key, model), true);
+  const blocked = await patch({ blockedModels: ["claude/*"] });
+  assert.equal(blocked.status, 200);
+  assert.equal(await apiKeysDb.isModelAllowedForKey(created.key, model), false);
+  assert.equal(
+    await apiKeysDb.isModelAllowedForKey(created.key, model, { allowAuthorizedComboTarget: true }),
+    false,
+    "an authorized combo target must not bypass an explicit deny-list"
+  );
+  assert.equal(await apiKeysDb.isModelAllowedForKey(created.key, "openai/gpt-4.1"), true);
+
+  const renamed = await patch({ name: "Renamed without changing deny-list" });
+  assert.equal(renamed.status, 200);
+  const stored = await keyRoute.GET(await makeManagementSessionRequest(url), params);
+  assert.equal(stored.status, 200);
+  assert.deepEqual((await stored.json()).blockedModels, ["claude/*"]);
+  assert.equal(await apiKeysDb.isModelAllowedForKey(created.key, model), false);
+
+  const cleared = await patch({ blockedModels: [] });
+  assert.equal(cleared.status, 200);
+  const afterClear = await keyRoute.GET(await makeManagementSessionRequest(url), params);
+  assert.deepEqual((await afterClear.json()).blockedModels, []);
+  assert.equal(await apiKeysDb.isModelAllowedForKey(created.key, model), true);
+});
+
+test("PATCH dashboard permission payload enforces deny-list precedence and rejects invalid updates", async () => {
+  await enableManagementAuth();
+  const createdResponse = await listRoute.POST(
+    await makeManagementSessionRequest("http://localhost/api/keys", {
+      method: "POST",
+      body: { name: "Dashboard deny-list" },
+    })
+  );
+  assert.equal(createdResponse.status, 201);
+  const created = (await createdResponse.json()) as { id: string; key: string };
+  const url = `http://localhost/api/keys/${created.id}`;
+  const params = { params: Promise.resolve({ id: created.id }) };
+  const patch = async (body: Record<string, unknown>) =>
+    keyRoute.PATCH(
+      await makeManagementSessionRequest(url, { method: "PATCH", body }),
+      params
+    );
+
+  const response = await patch({
+    name: "Dashboard deny-list",
+    modelAccessMode: "restricted",
+    allowedModels: ["claude/*"],
+    blockedModels: ["claude/claude-opus-5-5"],
+  });
+  assert.equal(response.status, 200);
+  assert.equal(
+    await apiKeysDb.isModelAllowedForKey(created.key, "claude/claude-opus-5-5"),
+    false,
+    "a successful dashboard save must not silently discard the deny-list"
+  );
+  assert.equal(
+    await apiKeysDb.isModelAllowedForKey(created.key, "claude/claude-sonnet-4-6"),
+    true
+  );
+  assert.equal(await apiKeysDb.isModelAllowedForKey(created.key, "openai/gpt-4.1"), false);
+
+  for (const blockedModels of ["claude/*", ["   "], Array(1001).fill("claude/*")]) {
+    const invalid = await patch({ name: "Must not persist", blockedModels });
+    assert.equal(invalid.status, 400);
+  }
+  const stored = await keyRoute.GET(await makeManagementSessionRequest(url), params);
+  const body = await stored.json();
+  assert.equal(body.name, "Dashboard deny-list");
+  assert.deepEqual(body.blockedModels, ["claude/claude-opus-5-5"]);
+  assert.equal(
+    await apiKeysDb.isModelAllowedForKey(created.key, "claude/claude-opus-5-5"),
+    false
+  );
+});
+
 test("PATCH /api/keys/[id] renames a key and rejects invalid names", async () => {
   await enableManagementAuth();
   await createManagementKey();
