@@ -30,7 +30,10 @@ await fs.mkdir(target);
 const archive = spawn("git", ["-C", root, "archive", commit], {
   stdio: ["ignore", "pipe", "inherit"],
 });
-const extract = spawn("tar", ["-x", "-C", target], { stdio: ["pipe", "inherit", "inherit"] });
+// Drain git archive's trailing zero padding rather than closing its pipe early.
+const extract = spawn("tar", ["--ignore-zeros", "-x", "-C", target], {
+  stdio: ["pipe", "inherit", "inherit"],
+});
 const archiveExit = once(archive, "close");
 const extractExit = once(extract, "close");
 await pipeline(archive.stdout, extract.stdin);
