@@ -66,6 +66,7 @@ import { rejectPeerRequest } from "@/shared/resilience/peerRouting";
 import { deleteHandoff, getHandoff } from "@/lib/db/contextHandoffs";
 import { getComboByName, updateCombo } from "@/lib/db/combos";
 import { isModelAllowedForKey } from "@/lib/db/apiKeys";
+import { ALL_COMBOS_ACCESS_RULE } from "@/shared/constants/comboAccess";
 import { promoteSuccessfulComboModel } from "@/lib/combos/autoPromote";
 import {
   deleteSessionAccountAffinity,
@@ -609,6 +610,11 @@ async function handleChatImplementation(
     return policy.rejection;
   }
   const apiKeyInfo = policy.apiKeyInfo;
+  if (apiKeyInfo?.allowedModels?.length && Array.isArray(apiKeyInfo.allowedCombos) &&
+      apiKeyInfo.allowedModels.every((name: string) => apiKeyInfo.allowedCombos.includes(name)) &&
+      !apiKeyInfo.allowedModels.includes(modelStr)) {
+    return errorResponse(HTTP_STATUS.FORBIDDEN, "This API key can only call its explicitly allowed combo names");
+  }
   let managedLease: ManagedLeaseDispatchContext | null = null;
   if (isExclusiveLeaseManagedKey(apiKeyInfo)) {
     try {
@@ -913,6 +919,24 @@ async function handleChatImplementation(
     // Pre-check function used by combo routing. For explicit combo live tests,
     // avoid pre-skipping so each model gets a real execution attempt.
     const comboPreselectedCredentials = new Map<string, any>();
+    // This exception is only valid for a client request that named a persisted
+    // combo which this key explicitly allows.  The combo object and its target
+    // metadata are server-resolved; request headers/body markers are ignored.
+    const persistedCombo = combo ? await getComboByName(combo.name).catch(() => null) : null;
+    const storedComboAllowlistException = (() => {
+      if (!apiKeyInfo || !Array.isArray(apiKeyInfo.allowedCombos)) return false;
+      if (!persistedCombo) return false;
+      if (!combo || (modelStr !== combo.name && modelStr !== `combo/${combo.name}`)) return false;
+      return apiKeyInfo.allowedCombos.some((rule: unknown) => {
+        if (typeof rule !== "string") return false;
+        const normalized = rule.trim();
+        return (
+          normalized === ALL_COMBOS_ACCESS_RULE ||
+          normalized === combo.name ||
+          normalized === `combo/${combo.name}`
+        );
+      });
+    })();
     const getComboCredentialCacheKey = (
       modelString: string,
       target?: { connectionId?: string | null; executionKey?: string | null }
@@ -924,10 +948,14 @@ async function handleChatImplementation(
         connectionId?: string | null;
         allowedConnectionIds?: string[] | null;
         executionKey?: string | null;
+        modelStr?: string | null;
         providerId?: string | null;
       }
     ) => {
-      if (isComboLiveTest) return true;
+      // Internal live-test headers must never bypass a public API key's policy.
+      // Keep the no-key dashboard/test path available, but authenticated
+      // requests always take the normal target checks below.
+      if (isComboLiveTest && !apiKey) return true;
 
       // #9057: for keys with model restrictions (allowedModels or disableNonPublicModels),
       // run isModelAllowedForKey even for auto/* models. The API-key policy gate
@@ -939,7 +967,24 @@ async function handleChatImplementation(
         apiKeyInfo &&
         (Boolean(apiKeyInfo.allowedModels?.length) || apiKeyInfo.disableNonPublicModels === true);
       if (hasModelRestrictions && apiKey) {
-        const modelAllowed = await isModelAllowedForKey(apiKey, modelString);
+        // The combo name passed the API-key combo allow-list before this
+        // server-created target was selected.  Permit that target through the
+        // per-key model allow-list, while retaining blocked-model, public-model,
+        // group, connection, quota, and rate-limit checks in isModelAllowedForKey.
+        // Never infer this from a request header or body marker.
+        const authorizedComboTarget =
+          storedComboAllowlistException &&
+          Array.isArray(apiKeyInfo.allowedCombos) &&
+          apiKeyInfo.allowedCombos.includes(combo.name) &&
+          Array.isArray(apiKeyInfo.allowedModels) &&
+          apiKeyInfo.allowedModels.includes(combo.name) &&
+          modelStr === combo.name &&
+          target?.modelStr === modelString &&
+          typeof target?.executionKey === "string" &&
+          target.executionKey.length > 0;
+        const modelAllowed = await isModelAllowedForKey(apiKey, modelString, {
+          allowAuthorizedComboTarget: authorizedComboTarget,
+        });
         if (!modelAllowed) return false;
       }
 
