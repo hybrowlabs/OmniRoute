@@ -1,5 +1,6 @@
 # ── Common base with runtime deps ──────────────────────────────────────────
-FROM node:26-trixie-slim AS base
+ARG NODE_IMAGE=node:26-trixie-slim
+FROM ${NODE_IMAGE} AS base
 WORKDIR /app
 
 # `apt-get upgrade` pulls the security-patched versions of the Debian (trixie)
@@ -40,8 +41,9 @@ RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,targe
 # tar ^7.5.4 and undici ^6.25.0 — hence undici stays on the 6.x line, NOT 8.x).
 # --install-strategy=nested makes each replacement self-contained, so it cannot
 # perturb the versions the rest of npm's flat tree resolves.
+ARG NPM_VERSION=12.0.2
 RUN set -eux; \
-  npm install -g npm@latest; \
+  npm install -g "npm@${NPM_VERSION}"; \
   npm install --prefix /tmp/npm-cve-patch --no-audit --no-fund --ignore-scripts \
     --install-strategy=nested \
     brace-expansion@5.0.9 ip-address@10.5.0 tar@7.5.22 undici@6.28.0; \
@@ -78,8 +80,9 @@ COPY package*.json ./
 # the workspace and installs its *workspace-only* deps (e.g. safe-regex,
 # @toon-format/toon — declared in open-sse/package.json, not hoisted to root).
 # Without this, `npm ci` skips them and the application build fails with "Module not
-# found" (root cause of the v3.8.39 Docker build break). workspaces = ["open-sse"].
+# found" (root cause of the v3.8.39 Docker build break). Include both workspaces.
 COPY open-sse/package.json ./open-sse/package.json
+COPY packages/browser-pool/package.json ./packages/browser-pool/package.json
 COPY scripts/build/postinstall.mjs ./scripts/build/postinstall.mjs
 COPY scripts/build/postinstallSupport.mjs ./scripts/build/postinstallSupport.mjs
 COPY scripts/build/native-binary-compat.mjs ./scripts/build/native-binary-compat.mjs

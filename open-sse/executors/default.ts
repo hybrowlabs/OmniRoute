@@ -14,8 +14,9 @@ import { getGigachatAccessToken } from "../services/gigachatAuth.ts";
 import { getRegistryEntry } from "../config/providerRegistry.ts";
 import { getModelTargetFormat } from "../config/providerModels.ts";
 import {
-  mergeClientAnthropicBeta,
+  applyClientAnthropicBeta,
   normalizeAnthropicHeaderVariants,
+  maybeAppendSkillsBeta,
 } from "../config/anthropicHeaders.ts";
 import { isOfficialAnthropicBaseUrl } from "../utils/anthropicHost.ts";
 import { applyProviderRequestDefaults } from "../services/providerRequestDefaults.ts";
@@ -395,7 +396,9 @@ export class DefaultExecutor extends BaseExecutor {
     credentials,
     stream = true,
     clientHeaders?: Record<string, string> | null,
-    model?: string | null
+    model?: string | null,
+    _health?: unknown,
+    body?: unknown
   ) {
     const { headers, effectiveKey } = this.buildHeadersPreamble(credentials, stream);
 
@@ -600,19 +603,15 @@ export class DefaultExecutor extends BaseExecutor {
       // 400 "Tool reference not found". Allowlist-merge preserves it without
       // forwarding betas the backend rejects.
       const clientBeta = clientHeaders["anthropic-beta"] ?? clientHeaders["Anthropic-Beta"] ?? null;
-      const betaKey = Object.keys(headers).find((key) => key.toLowerCase() === "anthropic-beta");
-      if (betaKey && clientBeta) {
-        headers[betaKey] = mergeClientAnthropicBeta(
-          headers[betaKey],
-          clientBeta,
-          undefined,
-          // Gate the client-negotiated context-1m beta on the RESOLVED target model:
-          // combo/fallback can route a request negotiated for a [1m] sibling onto a
-          // model that does not qualify (e.g. Haiku), which Anthropic rejects (#10119).
-          model
-        );
-      }
+      // Gate negotiated betas on the resolved model and actual tool shape.
+      applyClientAnthropicBeta(headers, clientBeta, {
+        seedWhenAbsent: this.provider?.startsWith?.("anthropic-compatible-") === true,
+        model,
+        body,
+      });
     }
+
+    maybeAppendSkillsBeta(headers, this.provider, body, this.usesClaudeCodeProtocol(credentials));
 
     normalizeAnthropicHeaderVariants(headers);
 
@@ -639,8 +638,7 @@ export class DefaultExecutor extends BaseExecutor {
 
     const record = body as Record<string, unknown>;
     const rf = record.response_format as
-      | { type?: string; json_schema?: { schema?: unknown } }
-      | undefined;
+      { type?: string; json_schema?: { schema?: unknown } } | undefined;
     if (!rf) return body;
 
     // openai-compatible-* providers accept json_object natively — only the

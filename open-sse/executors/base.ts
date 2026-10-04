@@ -9,6 +9,8 @@ import {
   CLAUDE_CLI_STAINLESS_RUNTIME_VERSION,
   mergeClientAnthropicBeta,
   normalizeAnthropicHeaderVariants,
+  maybeAppendSkillsBeta,
+  syncSkillsBeta,
 } from "../config/anthropicHeaders.ts";
 import { applyContextEditingToBody } from "../config/contextEditing.ts";
 import {
@@ -63,7 +65,7 @@ import {
   appendAnthropicBetaHeader,
   CLAUDE_CODE_COMPATIBLE_REDACT_THINKING_BETA,
   CONTEXT_1M_BETA_HEADER,
-  enforceThinkingTemperature,
+  finalizeClaudeBodyConstraints,
   modelHasNativeContext1m,
   modelSupportsContext1mBeta,
 } from "../services/claudeCodeCompatible.ts";
@@ -529,6 +531,8 @@ export class BaseExecutor {
 
     headers["Accept"] = stream ? "text/event-stream" : "application/json";
 
+    maybeAppendSkillsBeta(headers, this.provider, body, this.usesClaudeCodeProtocol(credentials));
+
     normalizeAnthropicHeaderVariants(headers);
 
     return headers;
@@ -902,6 +906,9 @@ export class BaseExecutor {
         clampNestedThinkingBudget(transformedBody, thinkingBudgetClampedMax);
       }
 
+      // Match Skills negotiation to the transformed body, including tool-less requests.
+      syncSkillsBeta(headers, this.provider, transformedBody, usesClaudeCodeProtocol);
+
       try {
         // Timeout only covers response start; stream stalls are handled downstream.
         const fetchStartTimeoutMs = this.getTimeoutMs();
@@ -1237,7 +1244,8 @@ export class BaseExecutor {
                 // Gate the client-negotiated context-1m beta on the RESOLVED target:
                 // combo/fallback can route a request negotiated for a [1m] sibling onto a
                 // model that does not qualify (e.g. Haiku), which Anthropic rejects (#10119).
-                model
+                model,
+                tb
               ),
               "anthropic-dangerous-direct-browser-access": "true",
               "x-app": "cli",
@@ -1348,7 +1356,7 @@ export class BaseExecutor {
         // routing mode (grouped/raw/combo) and the native passthrough share,
         // before fingerprinting and CCH signing serialize the body.
         if (this.provider === "claude" || usesClaudeCodeProtocol) {
-          enforceThinkingTemperature(transformedBody as Record<string, unknown>);
+          finalizeClaudeBodyConstraints(transformedBody as Record<string, unknown>);
         }
 
         // Delegated Context Editing (opt-in): attach the clear_tool_uses strategy so

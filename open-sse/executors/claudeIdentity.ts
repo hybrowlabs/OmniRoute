@@ -305,6 +305,7 @@ const HEAVY_AGENT_BETA_MODEL_PREFIXES = ["claude-opus", "claude-sonnet"];
  */
 const CONTEXT_1M_BETA_MODEL_PREFIXES = ["claude-opus"];
 const CONTEXT_1M_NATIVE_MODEL_PREFIXES = ["claude-opus-5"];
+const MID_CONVERSATION_SYSTEM_MODEL_PREFIXES = ["claude-opus", "claude-fable"];
 
 function matchesModelPrefix(model: unknown, prefixes: string[]): boolean {
   if (typeof model !== "string") return false;
@@ -336,7 +337,9 @@ export function shouldUseMidConversationSystem(
   const effectiveModel = model ?? (typeof payload.model === "string" ? payload.model : "");
 
   return (
-    hasSystem && hasTools && matchesModelPrefix(effectiveModel, CONTEXT_1M_BETA_MODEL_PREFIXES)
+    hasSystem &&
+    hasTools &&
+    matchesModelPrefix(effectiveModel, MID_CONVERSATION_SYSTEM_MODEL_PREFIXES)
   );
 }
 
@@ -393,12 +396,19 @@ export function selectBetaFlags(
   const isHeavyAgent = isFullAgent && isHeavyAgentModel(effectiveModel);
   const isOpusAgent = shouldUseMidConversationSystem(b, effectiveModel);
   const isContext1m = isFullAgent && isContext1mModel(effectiveModel);
+  // Message-level output_config requires its beta on the same request.
+  const hasMessageOutputConfig = Array.isArray(b.messages)
+    ? (b.messages as unknown[]).some(
+        (m) => !!m && typeof m === "object" && "output_config" in (m as Record<string, unknown>)
+      )
+    : false;
 
   const flags: string[] = [];
   if (isFullAgent) flags.push("claude-code-20250219");
   flags.push("oauth-2025-04-20");
   if (isContext1m) flags.push("context-1m-2025-08-07");
   if (isOpusAgent) flags.push("mid-conversation-system-2026-04-07");
+  if (hasMessageOutputConfig) flags.push("mid-conversation-output-config-2026-07-01");
   // Thinking betas: gated on the client header (#3415). interleaved-thinking forces
   // interleaved-thinking semantics that conflict with a tool_choice-forced turn,
   // producing malformed opus tool_use streams when the client never asked for it.
