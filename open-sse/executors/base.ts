@@ -68,6 +68,7 @@ import { parseTokenExpiryMs } from "@/lib/tokenHealthCheckExpiry";
 import {
   cloakThirdPartyToolNames,
   remapToolNamesInRequest,
+  shortenClaudeToolNames,
 } from "../services/claudeCodeToolRemapper.ts";
 import { obfuscateInBody } from "../services/claudeCodeObfuscation.ts";
 import { sanitizeClaudeToolSchemas } from "../translator/helpers/schemaCoercion.ts";
@@ -1376,6 +1377,7 @@ export class BaseExecutor {
         // before fingerprinting and CCH signing serialize the body.
         if (this.provider === "claude" || usesClaudeCodeProtocol) {
           finalizeClaudeBodyConstraints(transformedBody as Record<string, unknown>);
+          shortenClaudeToolNames(transformedBody as Record<string, unknown>);
         }
 
         // Delegated Context Editing (opt-in): attach the clear_tool_uses strategy so

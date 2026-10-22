@@ -801,6 +801,18 @@ async function handleChatImplementation(
     });
   }
   const apiKeyInfo = policy.apiKeyInfo;
+  if (
+    process.env.OMNIROUTE_DEPLOYMENT_ROLE === "primary" &&
+    apiKeyInfo?.allowedModels?.length &&
+    Array.isArray(apiKeyInfo.allowedCombos) &&
+    apiKeyInfo.allowedModels.every((name: string) => apiKeyInfo.allowedCombos.includes(name)) &&
+    !apiKeyInfo.allowedModels.includes(modelStr)
+  ) {
+    return errorResponse(
+      HTTP_STATUS.FORBIDDEN,
+      "This API key can only call its explicitly allowed combo names"
+    );
+  }
   let managedLease: ManagedLeaseDispatchContext | null = null;
   if (isExclusiveLeaseManagedKey(apiKeyInfo)) {
     try {

@@ -1586,7 +1586,8 @@ export async function getApiKeyMetadata(
 export async function isModelAllowedForKey(
   key: string | null | undefined,
   modelId: string | null | undefined,
-  resolvedModelId?: string | null
+  resolvedModelId?: string | null,
+  options: { allowAuthorizedComboTarget?: boolean } = {}
 ): Promise<boolean> {
   // If no key provided, allow (request may be using different auth method like JWT)
   // If no modelId provided, deny (invalid request)
@@ -1605,7 +1606,11 @@ export async function isModelAllowedForKey(
 
   // Check permission cache
   const cached = getCachedModelPermission(cacheKey, now, catalogGeneration);
-  if (!usesSettingDependentClaudeRouting && cached !== undefined) {
+  if (
+    !options.allowAuthorizedComboTarget &&
+    !usesSettingDependentClaudeRouting &&
+    cached !== undefined
+  ) {
     return cached;
   }
 
@@ -1667,8 +1672,9 @@ export async function isModelAllowedForKey(
   // keys with an empty per-key allow-list (#8817 regression guard — groups only
   // AND-deny, so restricted+[] stays deny-all).
   // Support exact match and prefix match (e.g., "openai/*" allows all OpenAI models)
-  let allowed =
-    !allowedModels || allowedModels.length === 0
+  let allowed = options.allowAuthorizedComboTarget
+    ? true
+    : !allowedModels || allowedModels.length === 0
       ? modelAccessMode !== "restricted"
       : allowedModels.some((pattern) => modelPatternMatches(pattern, modelPermissionCandidates));
 
@@ -1694,7 +1700,7 @@ export async function isModelAllowedForKey(
     }
   }
   // Cache the result
-  if (!usesSettingDependentClaudeRouting) {
+  if (!options.allowAuthorizedComboTarget && !usesSettingDependentClaudeRouting) {
     evictModelPermissionCache();
     setCachedModelPermission(cacheKey, allowed, now, catalogGeneration);
   }

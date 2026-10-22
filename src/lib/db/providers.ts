@@ -18,6 +18,10 @@ import { isRetestAutoDisabledEnabled } from "@/lib/credentialHealth/retestAutoDi
 import { ensureProviderSpecificDataSecretsEncrypted } from "./providers/migrations";
 import { bumpProxyConfigGeneration, getSettings } from "./settings";
 import {
+  publishConnectionCooldown,
+  clearConnectionCooldown,
+} from "./providers/connectionCooldownSync";
+import {
   getStoredManagementPassword,
   isBcryptHash,
   verifyManagementPassword,
@@ -1049,6 +1053,20 @@ export async function updateProviderConnection(
   backupDbFile("pre-write");
   invalidateConnectionUpdate(id, data, opts);
   bumpProxyConfigGeneration();
+  if (
+    ["testStatus", "rateLimitedUntil", "lastErrorType", "backoffLevel"].some((key) => key in data)
+  ) {
+    if ("rateLimitedUntil" in data && !data.rateLimitedUntil) {
+      clearConnectionCooldown(id);
+    } else {
+      publishConnectionCooldown(id, {
+        testStatus: (merged.testStatus as string | null) ?? null,
+        rateLimitedUntil: (merged.rateLimitedUntil as string | null) ?? null,
+        lastErrorType: (merged.lastErrorType as string | null) ?? null,
+        backoffLevel: (merged.backoffLevel as number | null) ?? null,
+      });
+    }
+  }
 
   // Zero is the internal move-to-top sentinel. Explicit positive priorities
   // are operator-selected values, not ranks to compact after every edit.
