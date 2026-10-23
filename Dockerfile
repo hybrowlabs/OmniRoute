@@ -396,10 +396,13 @@ RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,targe
 # `spawn qodercli ENOENT`. Same pinning rationale as the tools above.
 RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,target=/root/.npm \
   npm install -g --no-audit --no-fund \
+    --allow-scripts=@anthropic-ai/claude-code,@qoder-ai/qodercli,droid,openclaw,sharp,@google/genai,koffi,tree-sitter-bash,protobufjs \
     @openai/codex@0.163.0 \
     @anthropic-ai/claude-code@2.1.308 \
     droid@0.212.0 \
     openclaw@2026.9.1 \
-    @qoder-ai/qodercli@1.1.63
+    @qoder-ai/qodercli@1.1.63 \
+  && claude --version \
+  && codex --version
 
 USER node
