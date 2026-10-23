@@ -7,8 +7,12 @@
  * inner target so #9057 holds.
  */
 
-import { isModelBlockedByPatterns } from "@/lib/db/apiKeys";
+import {
+  isModelAllowedForKey as checkStoredModelPolicy,
+  isModelBlockedByPatterns,
+} from "@/lib/db/apiKeys";
 import { isComboNameAllowedForKey } from "@/shared/utils/apiKeyPolicy";
+import { hasApiKeyModelRestrictions } from "@/shared/utils/resolvedModelAccess";
 
 export type ComboTargetKeyPolicyInfo = {
   allowedModels?: string[] | null;
@@ -17,6 +21,16 @@ export type ComboTargetKeyPolicyInfo = {
   modelAccessMode?: string | null;
   allowedCombos?: string[] | null;
 };
+
+export type ComboTargetKeyPolicyOptions = {
+  apiKey: string | null | undefined;
+  apiKeyInfo: ComboTargetKeyPolicyInfo | null | undefined;
+  requestedModelStr: string;
+  targetModelStr: string;
+  isModelAllowedForKey: (key: string, model: string) => Promise<boolean>;
+};
+
+export type ComboTargetPreflightDecision = "deny" | "check-availability" | "bypass-availability";
 
 function modelMatchesAllowPattern(pattern: string, model: string): boolean {
   if (pattern.endsWith("/*")) return model.startsWith(pattern.slice(0, -1));
@@ -31,27 +45,38 @@ function allowListCoversRequestedCombo(
   return allowedModels.some((pattern) => modelMatchesAllowPattern(pattern, requestedModelStr));
 }
 
-export async function comboTargetPassesKeyModelPolicy(opts: {
-  apiKey: string | null | undefined;
-  apiKeyInfo: ComboTargetKeyPolicyInfo | null | undefined;
-  requestedModelStr: string;
-  targetModelStr: string;
-  isModelAllowedForKey: (key: string, model: string) => Promise<boolean>;
-}): Promise<boolean> {
+/**
+ * A stored (non-`auto/*`) combo named in the key's `allowedCombos` grants its
+ * own targets (#14197). `auto/*` combos keep per-candidate model checks (#9057).
+ */
+export function isExplicitlyAllowedComboForKey(
+  apiKeyInfo: ComboTargetKeyPolicyInfo | null | undefined,
+  requestedModelStr: string | null | undefined
+): boolean {
+  if (!apiKeyInfo || !requestedModelStr) return false;
+  return (
+    !requestedModelStr.startsWith("auto/") &&
+    Array.isArray(apiKeyInfo.allowedCombos) &&
+    isComboNameAllowedForKey(apiKeyInfo.allowedCombos, requestedModelStr)
+  );
+}
+
+export async function comboTargetPassesKeyModelPolicy(
+  opts: ComboTargetKeyPolicyOptions
+): Promise<boolean> {
   const { apiKey, apiKeyInfo, requestedModelStr, targetModelStr, isModelAllowedForKey } = opts;
   if (!apiKey || !apiKeyInfo) return true;
 
-  const hasModelRestrictions =
-    Boolean(apiKeyInfo.allowedModels?.length) ||
-    Boolean(apiKeyInfo.blockedModels?.length) ||
-    apiKeyInfo.disableNonPublicModels === true;
-  if (!hasModelRestrictions) return true;
+  if (!hasApiKeyModelRestrictions(apiKeyInfo)) return true;
 
-  const explicitlyAllowedCombo =
-    !requestedModelStr.startsWith("auto/") &&
-    Array.isArray(apiKeyInfo.allowedCombos) &&
-    isComboNameAllowedForKey(apiKeyInfo.allowedCombos, requestedModelStr);
-  if (explicitlyAllowedCombo) return true;
+  if (isExplicitlyAllowedComboForKey(apiKeyInfo, requestedModelStr)) {
+    if (process.env.OMNIROUTE_DEPLOYMENT_ROLE === "primary") {
+      return checkStoredModelPolicy(apiKey, targetModelStr, undefined, {
+        allowAuthorizedComboTarget: true,
+      });
+    }
+    return true;
+  }
 
   if (await isModelBlockedByPatterns(apiKeyInfo.blockedModels, targetModelStr)) return false;
 
@@ -60,4 +85,15 @@ export async function comboTargetPassesKeyModelPolicy(opts: {
   }
 
   return isModelAllowedForKey(apiKey, targetModelStr);
+}
+
+/**
+ * A combo live test may skip availability probes only after target authorization.
+ * The client marker can never convert a denied model into an authorized target.
+ */
+export async function evaluateComboTargetPreflight(
+  opts: ComboTargetKeyPolicyOptions & { isComboLiveTest: boolean }
+): Promise<ComboTargetPreflightDecision> {
+  if (!(await comboTargetPassesKeyModelPolicy(opts))) return "deny";
+  return opts.isComboLiveTest ? "bypass-availability" : "check-availability";
 }
