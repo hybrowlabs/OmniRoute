@@ -1,3 +1,10 @@
+import {
+  configuredClaudeReplay,
+  withClaudeReplay,
+  flushClaudeReplay,
+} from "../services/claudeReplayContext.ts";
+import { ClaudeReplayError } from "../services/claudeReplayRedis.ts";
+import { createTranslationFailureResult as replayFailureResult } from "./chatCore/translationFailure.ts";
 import { finalizeTranslatedRequest } from "./chatCore/translatedRequestFinalize.ts";
 import {
   injectMemoryAndSkills,
@@ -338,7 +345,43 @@ type VideoBridgeLogParam = { observed: boolean; redaction: VideoBridgeLogRedacti
 export async function handleChatCore(args: Parameters<typeof handleChatCoreInner>[0]) {
   // one implicit resilience store per attempt (combo legs each run
   // handleChatCore, so each leg gets its own isolated store).
-  return withResilienceActionsContext([args], (forwarded) => handleChatCoreInner(forwarded));
+  const execute = () =>
+    withResilienceActionsContext([args], (forwarded) => handleChatCoreInner(forwarded));
+  // Opt-in first-party Claude replay. Scope comes only from authenticated metadata,
+  // never client headers/body. Other providers retain their existing behavior.
+  if (
+    args.modelInfo?.provider !== "claude" ||
+    !process.env.CLAUDE_REPLAY_REDIS_URL ||
+    (args.videoBridgeLog as VideoBridgeLogParam | undefined)?.observed === true
+  )
+    return execute();
+  try {
+    const backend = configuredClaudeReplay();
+    const scope = args.apiKeyInfo?.id;
+    if (!backend || !scope) throw new ClaudeReplayError("CLAUDE_REPLAY_UNAVAILABLE");
+    return await withClaudeReplay(
+      backend,
+      {
+        scope,
+        provider: args.modelInfo.provider,
+        model: applyClaudeEffortVariant({
+          provider: args.modelInfo.provider,
+          effectiveModel: args.modelInfo.model,
+          body: null,
+          sourceFormat: FORMATS.OPENAI,
+        }).effectiveModel,
+      },
+      args.body,
+      async () => {
+        const result = await execute();
+        await flushClaudeReplay();
+        return result;
+      }
+    );
+  } catch (error) {
+    if (!(error instanceof ClaudeReplayError)) throw error;
+    return replayFailureResult(error.statusCode, error.message, error.code);
+  }
 }
 
 async function handleChatCoreInner({

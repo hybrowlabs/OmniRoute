@@ -1,0 +1,34 @@
+# Optional dedicated replay store. Attach router containers to this internal
+# network and set CLAUDE_REPLAY_REDIS_URL=redis://claude-replay-redis:6379.
+# Never publish this port; encrypted values do not replace network isolation.
+services:
+  claude-replay-redis:
+    image: redis:7.4-alpine
+    command:
+      [
+        redis-server,
+        --maxmemory,
+        256mb,
+        --maxmemory-policy,
+        noeviction,
+        --appendonly,
+        "yes",
+        --appendfsync,
+        everysec,
+      ]
+    mem_limit: 512m
+    volumes:
+      - claude-replay-data:/data
+    networks:
+      - claude-replay
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+volumes:
+  claude-replay-data:
+networks:
+  claude-replay:
+    internal: true

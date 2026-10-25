@@ -45,6 +45,10 @@ Live count: `ls open-sse/services/*.ts | wc -l` (currently 134). More including 
 
 ### State & Detection
 
+- **`claudeReplayRedis.ts`** — Encrypted shared signed-thinking storage; authenticated scope, provider/model binding, 900-second sliding expiry.
+- **`claudeReplayContext.ts`** — Request-scoped hydration and acknowledged-write barriers; configured through `CLAUDE_REPLAY_REDIS_URL` and `CLAUDE_REPLAY_ENCRYPTION_KEY`.
+- **`claudeReplayCompletion.ts`** — Prevents client completion from preceding shared replay persistence; emits an explicit error on write failure.
+
 - **`workflowFSM.ts`** — Multi-turn workflow state machine.
 - **`backgroundTaskDetector.ts`** — Long-running task detection for batch routing.
 - **`ipFilter.ts`** — IP-based routing rules.

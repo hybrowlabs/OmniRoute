@@ -1,3 +1,7 @@
+import {
+  isSharedRestoredThinking,
+  hasSharedToolOnlyReply,
+} from "../../services/claudeReplayContext.ts";
 // Claude helper functions for translator
 import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../config/defaultThinkingSignature.ts";
 import { lookupReasoning, recordReplay } from "../../services/reasoningCache.ts";
@@ -735,6 +739,10 @@ export function prepareClaudeRequest(
         let thinkingBlockIdx = 0;
         for (const block of content) {
           if (block.type === "thinking" || block.type === "redacted_thinking") {
+            if (isSharedRestoredThinking(block)) {
+              hasThinking = true;
+              continue;
+            }
             if (isKimiCoding) {
               if (block.type === "redacted_thinking") {
                 block.type = "thinking";
@@ -788,7 +796,7 @@ export function prepareClaudeRequest(
         // thinking-mode upstreams (claude, kimi-coding, glm, …) when the
         // assistant turn's content[] needs a thinking block in front of any
         // tool_use. Use the same provider-aware shape selection as above.
-        if (thinkingEnabled && !hasThinking && hasToolUse) {
+        if (thinkingEnabled && !hasThinking && hasToolUse && !hasSharedToolOnlyReply(content)) {
           if (supportsRedactedThinking) {
             content.unshift({
               type: "redacted_thinking",

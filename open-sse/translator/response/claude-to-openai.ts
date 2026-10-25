@@ -49,7 +49,7 @@ function flushThinkingContinuity(state) {
   if (state.claudeThinkingFlushed) return;
   state.claudeThinkingFlushed = true;
   const blocks = thinkingBlocksOf(state);
-  if (blocks.size === 0 || !(state.toolCalls instanceof Map) || state.toolCalls.size === 0) return;
+  if (!(state.toolCalls instanceof Map) || state.toolCalls.size === 0) return;
   storeClaudeThinkingBlocks({
     toolUseIds: [...state.toolCalls.values()].map((toolCall) => toolCall?.id),
     blocks: [...blocks.entries()].sort(([left], [right]) => left - right).map(([, b]) => b),
