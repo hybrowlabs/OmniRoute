@@ -356,7 +356,7 @@ export async function handleChatCore(args: Parameters<typeof handleChatCoreInner
   )
     return execute();
   try {
-    const backend = configuredClaudeReplay();
+    const backend = await configuredClaudeReplay();
     const scope = args.apiKeyInfo?.id;
     if (!backend || !scope) throw new ClaudeReplayError("CLAUDE_REPLAY_UNAVAILABLE");
     return await withClaudeReplay(

@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import Redis from "ioredis";
 import {
   ClaudeReplayError,
   ClaudeReplayRedis,
@@ -99,12 +98,15 @@ export function hasSharedToolOnlyReply(content: unknown[]): boolean {
   return ids.length > 0 && ids.every((id) => context.entries.get(id)?.length === 0);
 }
 let backend: Backend | undefined;
-export function configuredClaudeReplay(): Backend | undefined {
+export async function configuredClaudeReplay(): Promise<Backend | undefined> {
   const url = process.env.CLAUDE_REPLAY_REDIS_URL;
   if (!url) return undefined;
   if (backend) return backend;
   const encoded = process.env.CLAUDE_REPLAY_ENCRYPTION_KEY ?? "";
   if (!/^[a-fA-F0-9]{64}$/.test(encoded)) throw new ClaudeReplayError("CLAUDE_REPLAY_UNAVAILABLE");
+  const { default: Redis } = await import("ioredis");
+  // Concurrent initializers must share one connection after the lazy import.
+  if (backend) return backend;
   const redis = new Redis(url, {
     lazyConnect: true,
     enableOfflineQueue: false,
