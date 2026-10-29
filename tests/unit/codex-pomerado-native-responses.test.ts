@@ -214,3 +214,28 @@ test("Responses messages retain the required SDK status in non-streaming output"
     assert.equal((response.output as Array<Record<string, unknown>>)[0].status, status);
   }
 });
+
+test("headerless Codex SSE restores native patch calls", async () => {
+  const event = {
+    type: "response.completed",
+    response: {
+      output: [
+        {
+          id: "fc_headerless",
+          type: "function_call",
+          name: APPLY_PATCH_FUNCTION,
+          call_id: "call_headerless",
+          status: "completed",
+          arguments: JSON.stringify({ operation: { type: "delete_file", path: "synthetic.txt" } }),
+        },
+      ],
+    },
+  };
+  const response = restoreApplyPatchResponse(
+    new Response(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`))
+  );
+  assert.equal(response.headers.get("content-type"), "text/event-stream");
+  const text = await response.text();
+  assert.match(text, /apply_patch_call/);
+  assert.doesNotMatch(text, /__omniroute_apply_patch/);
+});

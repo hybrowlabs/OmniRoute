@@ -111,11 +111,9 @@ function restoreItem(value: unknown): unknown {
 }
 
 export function restoreApplyPatchResponse(response: Response): Response {
-  if (
-    !response.ok ||
-    !response.body ||
-    !response.headers.get("content-type")?.includes("text/event-stream")
-  )
+  // Codex is SSE-first but can omit Content-Type on successful responses.
+  const contentType = response.headers.get("content-type");
+  if (!response.ok || !response.body || (contentType && !contentType.includes("text/event-stream")))
     return response;
   const patchIds = new Set<unknown>();
   let sequence = 0;
@@ -203,6 +201,7 @@ export function restoreApplyPatchResponse(response: Response): Response {
   });
   const headers = new Headers(response.headers);
   headers.delete("content-length");
+  if (!contentType) headers.set("content-type", "text/event-stream");
   return new Response(response.body.pipeThrough(transform), {
     status: response.status,
     statusText: response.statusText,
