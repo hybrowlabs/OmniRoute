@@ -192,3 +192,25 @@ test.after(() => {
   core.resetDbInstance();
   fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
+
+test("Responses messages retain the required SDK status in non-streaming output", async () => {
+  const { sanitizeResponsesApiResponse } =
+    await import("../../open-sse/handlers/responseSanitizer.ts");
+  for (const status of ["completed", "incomplete", "in_progress"]) {
+    const response = sanitizeResponsesApiResponse({
+      id: "resp_guardian",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          id: "msg_guardian",
+          type: "message",
+          role: "assistant",
+          status,
+          content: [{ type: "output_text", text: '{"outcome":"allow"}', annotations: [] }],
+        },
+      ],
+    });
+    assert.equal((response.output as Array<Record<string, unknown>>)[0].status, status);
+  }
+});
