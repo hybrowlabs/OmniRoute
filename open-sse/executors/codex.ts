@@ -22,6 +22,11 @@ import {
 } from "../config/codexInstructions.ts";
 import { FETCH_BODY_TIMEOUT_MS, HTTP_STATUS, PROVIDERS } from "../config/constants.ts";
 import { readCodexPeekChunk, buildCodexTimeoutSafePassthroughBody } from "./codex/bodyTimeout.ts";
+import {
+  bridgeApplyPatchRequest,
+  usesNativeApplyPatch,
+  restoreApplyPatchResponse,
+} from "./codex/applyPatchBridge.ts";
 import { stripCodexPassthroughRejectedParams } from "./codex/stripPassthroughRejectedParams.ts";
 import {
   CODEX_CLI_RS_ORIGINATOR,
@@ -830,6 +835,14 @@ export class CodexExecutor extends BaseExecutor {
   }
 
   async execute(input: ExecuteInput) {
+    const result = await this.executeCodex(input);
+    if (usesNativeApplyPatch(input.body) && "response" in result) {
+      result.response = restoreApplyPatchResponse(result.response);
+    }
+    return result;
+  }
+
+  private async executeCodex(input: ExecuteInput) {
     const requestBody = enforceCodexResponsesLiteParallelToolCalls(
       input.body,
       input.clientHeaders,
@@ -1397,6 +1410,7 @@ export class CodexExecutor extends BaseExecutor {
 
     normalizeCodexResponsesInput(body);
 
+    bridgeApplyPatchRequest(body);
     sanitizeCodexResponsesInput(body, nativeCodexPassthrough);
     stripOrphanedCodexFunctionCallOutputs(body);
     repairMissingCodexToolCallOutputs(body);
