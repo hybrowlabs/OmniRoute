@@ -38,3 +38,14 @@ test("every leaf exit carries state (the leg-error exit must not return bare)", 
   const bareReturns = leaf.match(/^\s*return err;$/gm);
   assert.equal(bareReturns, null, "a bare `return err;` leaves the barrel reading .carry of undefined");
 });
+
+test("shared Claude replay barrier is awaited before any cache or idempotency save", () => {
+  const leaf = read(LEAF);
+  assert.match(leaf, /import \{ flushClaudeReplay \} from "\.\.\/\.\.\/services\/claudeReplayContext\.ts";/);
+  const flush = leaf.indexOf("await flushClaudeReplay()");
+  const semantic = leaf.indexOf("storeSemanticCacheResponse({");
+  const idempotency = leaf.indexOf("await saveIdempotency(");
+  assert.ok(flush > 0, "non-streaming path must await the replay write barrier");
+  assert.ok(flush < semantic, "barrier must precede the semantic cache write");
+  assert.ok(flush < idempotency, "barrier must precede the idempotency save (a retry would replay a 200 without replay state)");
+});
