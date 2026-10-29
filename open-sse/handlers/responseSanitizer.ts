@@ -799,6 +799,7 @@ function sanitizeResponsesOutputItem(item: unknown, index: number): JsonRecord |
       id: toString(itemRecord.id) || `msg_${index}`,
       type: "message",
       role: toString(itemRecord.role) || "assistant",
+      ...(itemRecord.status !== undefined ? { status: itemRecord.status } : {}),
       content, ...(itemRecord.phase ? { phase: toString(itemRecord.phase) } : {}),
     };
     return sanitized;

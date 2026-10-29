@@ -20,6 +20,21 @@ export function stripCodexPassthroughRejectedParams(
   model: string,
   body: Record<string, unknown>
 ): void {
+  delete body.prompt_cache_options;
+  delete body.prompt_cache_breakpoint;
+  // Only protocol envelopes: never recursively edit function schemas, arguments,
+  // patch operations or tool output payloads with similarly named properties.
+  const stripEnvelope = (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    delete (value as Record<string, unknown>).prompt_cache_breakpoint;
+  };
+  for (const value of Array.isArray(body.input) ? body.input : []) {
+    stripEnvelope(value);
+    if (value && typeof value === "object") {
+      for (const part of Array.isArray(value.content) ? value.content : []) stripEnvelope(part);
+    }
+  }
+  for (const tool of Array.isArray(body.tools) ? body.tools : []) stripEnvelope(tool);
   delete body.prompt_cache_retention;
   delete body.safety_identifier;
   delete body.user;
