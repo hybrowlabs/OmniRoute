@@ -14,8 +14,10 @@
  * the request translator can put every block back where Claude emitted it (#18607).
  *
  * Invariants:
- * - Memory only, TTL + size bounded. Thinking text and signatures never reach the
- *   DB or any log line (thinkingSignatureDiagnostics invariants).
+ * - Legacy mode is memory-only, TTL + size bounded. Hybrow's opt-in shared mode uses
+ *   encrypted Redis payloads and a 15-minute sliding TTL, scoped by authenticated
+ *   API-key identity. Thinking text and signatures never reach the DB or any log
+ *   line (thinkingSignatureDiagnostics invariants).
  * - Bound to provider + model + connection: a signature replayed to a different
  *   model, provider, or OAuth org/connection is a hard 400 (#6953, #17324), so a
  *   binding mismatch restores nothing.
@@ -23,6 +25,9 @@
  *   replayable (non-empty signature / data) and precedes a tool_use; a partial
  *   set would reorder the turn.
  */
+
+import { currentClaudeReplay, queueClaudeReplay } from "./claudeReplayContext.ts";
+import { ClaudeReplayError } from "./claudeReplayRedis.ts";
 
 export type ClaudeSignedThinkingBlock =
   | { type: "thinking"; thinking: string; signature: string }
@@ -158,6 +163,60 @@ function collectThinkingSegments(
 }
 
 /**
+ * Shared (Redis) capture. Unlike the memory store it also records tool-only turns
+ * (segments without blocks), so a later miss is distinguishable from "no thinking",
+ * and a replayable-block fault fails the request instead of silently dropping state.
+ */
+function storeSharedClaudeThinking(
+  context: NonNullable<ReturnType<typeof currentClaudeReplay>>,
+  content: unknown[],
+  provider: unknown,
+  model: string,
+  args: { connectionId?: unknown }
+): boolean {
+  const segments: ClaudeThinkingSegment[] = [];
+  let pending: ClaudeSignedThinkingBlock[] = [];
+  let size = 0;
+  for (const block of content) {
+    const record = (block ?? {}) as Record<string, unknown>;
+    if (record.type === "thinking" || record.type === "redacted_thinking") {
+      const normalized = normalizeBlock(block);
+      if (!normalized) {
+        const error = new ClaudeReplayError("CLAUDE_REPLAY_CORRUPT");
+        context.failure = error;
+        throw error;
+      }
+      pending.push(normalized);
+      size += blockSize(normalized);
+    } else if (record.type === "tool_use" && typeof record.id === "string" && record.id) {
+      segments.push({ toolUseId: record.id, blocks: pending });
+      pending = [];
+    }
+  }
+  if (segments.length === 0) return false;
+  if (pending.length > 0 || size > MAX_CLAUDE_THINKING_ENTRY_CHARS) {
+    const error = new ClaudeReplayError("CLAUDE_REPLAY_UNAVAILABLE");
+    context.failure = error;
+    throw error;
+  }
+  const connectionId = typeof args.connectionId === "string" ? args.connectionId : "";
+  const entry = { connectionId: connectionId || undefined, segments: cloneSegments(segments) };
+  const binding = { ...context.binding, provider: normalizeProvider(provider), model };
+  queueClaudeReplay(
+    context,
+    context.backend.write(
+      binding,
+      segments.map((segment) => segment.toolUseId),
+      entry
+    )
+  );
+  for (const { toolUseId } of segments) {
+    context.entries.set(toolUseId, { ...entry, segments: cloneSegments(segments) });
+  }
+  return true;
+}
+
+/**
  * Remember the signed thinking blocks of one assistant turn, in their original
  * layout, under each of its tool_use ids. `content` is the ordered content array
  * (thinking / redacted_thinking / tool_use; other block types are ignored). No-op
@@ -171,6 +230,9 @@ export function storeClaudeThinkingBlocks(args: {
 }): boolean {
   const model = normalizeClaudeThinkingModel(args.model);
   if (!model || !Array.isArray(args.content)) return false;
+
+  const context = currentClaudeReplay();
+  if (context) return storeSharedClaudeThinking(context, args.content, args.provider, model, args);
 
   const collected = collectThinkingSegments(args.content);
   if (!collected) return false;
@@ -235,6 +297,28 @@ export function restoreClaudeThinkingBlocks(args: {
   const model = normalizeClaudeThinkingModel(args.model);
   if (toolUseIds.length === 0 || !model) return null;
 
+  const context = currentClaudeReplay();
+  if (context) {
+    if (
+      normalizeProvider(args.provider) !== normalizeProvider(context.binding.provider) ||
+      model !== normalizeClaudeThinkingModel(context.binding.model)
+    ) {
+      throw new ClaudeReplayError("CLAUDE_REPLAY_MISSING");
+    }
+    const entry = toolUseIds
+      .map((id) => (typeof id === "string" ? context.entries.get(id) : undefined))
+      .find(Boolean);
+    if (!entry) throw new ClaudeReplayError("CLAUDE_REPLAY_MISSING");
+    // #17324: signatures are org-scoped; a different serving connection restores nothing.
+    const requested = typeof args.connectionId === "string" ? args.connectionId : "";
+    if (entry.connectionId && requested && entry.connectionId !== requested) return null;
+    const restored = cloneSegments(entry.segments);
+    for (const segment of restored) {
+      for (const block of segment.blocks) context.restored.add(block);
+    }
+    return markRestored(restored);
+  }
+
   pruneExpired(Date.now());
   const provider = normalizeProvider(args.provider);
   // #17324: thinking signatures are org-scoped. Replaying a block stored by one
@@ -296,6 +380,8 @@ function forgetEntriesHolding(blocks: unknown[]) {
  * server-restored block.
  */
 export function downgradeRestoredClaudeThinking(content: unknown): unknown[] | null {
+  // Shared replay must never downgrade signed blocks into invented placeholders.
+  if (currentClaudeReplay()) throw new ClaudeReplayError("CLAUDE_REPLAY_CORRUPT");
   if (!Array.isArray(content) || entries.size === 0) return null;
   const restored = content.filter(isStoredBlock);
   if (restored.length === 0) return null;
@@ -319,7 +405,12 @@ export function downgradeRestoredClaudeThinking(content: unknown): unknown[] | n
  * response that may echo video transcript cues.
  */
 export function forgetClaudeThinkingForClientResponse(responseBody: unknown): void {
-  if (!responseBody || typeof responseBody !== "object" || entries.size === 0) return;
+  if (
+    !responseBody ||
+    typeof responseBody !== "object" ||
+    (entries.size === 0 && !currentClaudeReplay())
+  )
+    return;
   const root = responseBody as Record<string, unknown>;
   const ids: string[] = [];
   if (Array.isArray(root.choices)) {
@@ -341,6 +432,11 @@ export function forgetClaudeThinkingForClientResponse(responseBody: unknown): vo
   for (const item of output) {
     const callId = (item as { call_id?: unknown } | null)?.call_id;
     if (typeof callId === "string") ids.push(callId);
+  }
+  const context = currentClaudeReplay();
+  if (context) {
+    queueClaudeReplay(context, context.backend.remove(context.binding, ids));
+    for (const id of ids) context.entries.delete(id);
   }
   for (const id of ids) deleteKey(id);
 }

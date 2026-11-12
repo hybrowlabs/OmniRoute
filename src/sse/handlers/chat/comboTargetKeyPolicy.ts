@@ -7,7 +7,10 @@
  * inner target so #9057 holds.
  */
 
-import { isModelBlockedByPatterns } from "@/lib/db/apiKeys";
+import {
+  isModelAllowedForKey as checkStoredModelPolicy,
+  isModelBlockedByPatterns,
+} from "@/lib/db/apiKeys";
 import { isComboNameAllowedForKey } from "@/shared/utils/apiKeyPolicy";
 import { hasApiKeyModelRestrictions } from "@/shared/utils/resolvedModelAccess";
 
@@ -66,7 +69,14 @@ export async function comboTargetPassesKeyModelPolicy(
 
   if (!hasApiKeyModelRestrictions(apiKeyInfo)) return true;
 
-  if (isExplicitlyAllowedComboForKey(apiKeyInfo, requestedModelStr)) return true;
+  if (isExplicitlyAllowedComboForKey(apiKeyInfo, requestedModelStr)) {
+    if (process.env.OMNIROUTE_DEPLOYMENT_ROLE === "primary") {
+      return checkStoredModelPolicy(apiKey, targetModelStr, undefined, {
+        allowAuthorizedComboTarget: true,
+      });
+    }
+    return true;
+  }
 
   if (await isModelBlockedByPatterns(apiKeyInfo.blockedModels, targetModelStr)) return false;
 

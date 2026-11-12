@@ -1,3 +1,5 @@
+import { currentClaudeReplay, runClaudeReplay } from "../services/claudeReplayContext.ts";
+import { createClaudeReplayCompletionGate } from "../services/claudeReplayCompletion.ts";
 import { translateResponse, initState } from "../translator/index.ts";
 import { FORMATS } from "../translator/formats.ts";
 import { appendRequestLog } from "@/lib/usageDb";
@@ -785,6 +787,10 @@ const STREAM_MODE = {
  * @param {function} options.onComplete - Callback when stream finishes: ({ status, usage }) => void
  */
 export function createSSEStream(options: StreamOptions = {}) {
+  const replayContext = currentClaudeReplay();
+  const translateWithReplay: typeof translateResponse = (...args) =>
+    runClaudeReplay(replayContext, () => translateResponse(...args));
+
   const {
     mode = STREAM_MODE.TRANSLATE,
     targetFormat,
@@ -2739,7 +2745,7 @@ export function createSSEStream(options: StreamOptions = {}) {
               requestToolIdentityMap
             );
           }
-          const translated = translateResponse(targetFormat, sourceFormat, parsed, state);
+          const translated = translateWithReplay(targetFormat, sourceFormat, parsed, state);
           if (state?.cacheEvidence !== lastPropagatedCacheEvidence) {
             usage = { ...usage, cache_evidence: state?.cacheEvidence };
             lastPropagatedCacheEvidence = state?.cacheEvidence;
@@ -3267,7 +3273,7 @@ export function createSSEStream(options: StreamOptions = {}) {
                     requestToolIdentityMap
                   );
                 }
-                const translated = translateResponse(targetFormat, sourceFormat, parsed, state);
+                const translated = translateWithReplay(targetFormat, sourceFormat, parsed, state);
                 for (const item of getOpenAIIntermediateChunks(translated)) {
                   const openaiOutput = formatSSE(item, FORMATS.OPENAI);
                   reqLogger?.appendOpenAIChunk?.(openaiOutput);
@@ -3335,7 +3341,7 @@ export function createSSEStream(options: StreamOptions = {}) {
                   requestToolIdentityMap
                 );
               }
-              const translated = translateResponse(targetFormat, sourceFormat, parsed, state);
+              const translated = translateWithReplay(targetFormat, sourceFormat, parsed, state);
               if (state?.cacheEvidence !== lastPropagatedCacheEvidence) {
                 usage = { ...usage, cache_evidence: state?.cacheEvidence };
                 lastPropagatedCacheEvidence = state?.cacheEvidence;
@@ -3364,7 +3370,7 @@ export function createSSEStream(options: StreamOptions = {}) {
             // open items (reasoning, tool calls, etc.), instead of silently
             // aborting the stream and leaving partial items dangling.
             try {
-              const flushed = translateResponse(targetFormat, sourceFormat, null, state);
+              const flushed = translateWithReplay(targetFormat, sourceFormat, null, state);
               if (flushed?.length > 0) {
                 for (const item of flushed) {
                   emitTranslatedClientItem(controller, item);
@@ -3408,7 +3414,7 @@ export function createSSEStream(options: StreamOptions = {}) {
           }
 
           // Flush remaining events (only once at stream end)
-          const flushed = translateResponse(targetFormat, sourceFormat, null, state);
+          const flushed = translateWithReplay(targetFormat, sourceFormat, null, state);
 
           // Log OpenAI intermediate chunks for flushed events
           for (const item of getOpenAIIntermediateChunks(flushed)) {
@@ -3626,11 +3632,19 @@ export function createSSEStream(options: StreamOptions = {}) {
     }),
     ...createByteLengthQueueStrategies(streamBufferBytes)
   );
-  trackStreamPartialUsage(sseStream, body, () => [
+  const result = replayContext
+    ? {
+        writable: sseStream.writable,
+        readable: sseStream.readable.pipeThrough(
+          createClaudeReplayCompletionGate(replayContext, sourceFormat === FORMATS.OPENAI_RESPONSES)
+        ),
+      }
+    : sseStream;
+  trackStreamPartialUsage(result, body, () => [
     nativeClaudeUsage ? getAccountingUsage() : (state?.usage ?? usage),
     totalContentLength,
   ]);
-  return registerStreamTiming(sseStream, timing);
+  return registerStreamTiming(result, timing);
 }
 
 export default createSSEStream;

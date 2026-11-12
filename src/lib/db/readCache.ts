@@ -156,7 +156,10 @@ export async function getCachedRawProviderConnections(
   const key = JSON.stringify(filter ?? {});
   return rawConnectionsCache.load(key, async () => {
     const { getRawProviderConnections } = await import("./providers");
-    return getRawProviderConnections(filter);
+    const { overlayCooldownState } = await import("./providers/connectionCooldownSync");
+    return overlayCooldownState(
+      (await getRawProviderConnections(filter)) as Record<string, unknown>[]
+    );
   });
 }
 

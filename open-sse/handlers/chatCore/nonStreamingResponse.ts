@@ -64,6 +64,7 @@ import { deleteSessionAccountAffinityBestEffort } from "@/lib/db/sessionAccountA
 import { writeTerminalStatus } from "@/shared/utils/terminalStatus";
 import { MEMORY_BUILTIN_TOOL_NAMES } from "@/lib/skills/memoryBuiltins";
 
+import { flushClaudeReplay } from "../../services/claudeReplayContext.ts";
 import { storeSemanticCacheResponse } from "../chatCore/semanticCacheStore.ts";
 import {
   isAntigravityProvider,
@@ -999,6 +1000,9 @@ export async function runNonStreamingResponse(deps: NonStreamingDeps) {
         },
       };
     }
+
+    // Shared replay state must be durable before this response can be cached or replayed.
+    await flushClaudeReplay();
 
     // ── Phase 9.1: Cache store (non-streaming, temp=0) ──
     storeSemanticCacheResponse({

@@ -2,6 +2,7 @@ import { register } from "../registry.ts";
 import { FORMATS } from "../formats.ts";
 import { initThinkState, applyThinkTag, flushThinkBuffer } from "../../utils/thinkTagParser.ts";
 import { storeClaudeThinkingBlocks } from "../../services/claudeThinkingStore.ts";
+import { currentClaudeReplay } from "../../services/claudeReplayContext.ts";
 
 type OpenAIUsage = {
   prompt_tokens: number;
@@ -49,7 +50,12 @@ function flushThinkingContinuity(state) {
   if (state.claudeThinkingFlushed) return;
   state.claudeThinkingFlushed = true;
   const blocks = thinkingBlocksOf(state);
-  if (blocks.size === 0 || !(state.toolCalls instanceof Map) || state.toolCalls.size === 0) return;
+  if (
+    (blocks.size === 0 && !currentClaudeReplay()) ||
+    !(state.toolCalls instanceof Map) ||
+    state.toolCalls.size === 0
+  )
+    return;
   const indexed: Array<[number, Record<string, unknown>]> = [
     ...blocks.entries(),
     ...[...state.toolCalls.entries()].map(

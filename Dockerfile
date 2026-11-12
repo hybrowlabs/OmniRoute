@@ -6,6 +6,8 @@
 # keeps it from going below that.
 FROM node:26.12.1-trixie-slim AS base
 WORKDIR /app
+ARG OMNIROUTE_DEPLOYMENT_ROLE=primary
+ENV OMNIROUTE_DEPLOYMENT_ROLE=${OMNIROUTE_DEPLOYMENT_ROLE}
 
 # Mirrors for builders whose network cannot reach the default sources
 # (deb.debian.org / registry.npmjs.org / nodejs.org). Defaults keep upstream
@@ -411,12 +413,15 @@ RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-apt-cache,targe
 # `spawn qodercli ENOENT`. Same pinning rationale as the tools above.
 # npm 12 requires an explicit allowlist for required global lifecycle scripts.
 RUN --mount=type=cache,id=s/92ca8a61-c1ba-421f-a389-d48ac7258c2d-npm-cache,target=/root/.npm \
-  npm install -g --no-audit --no-fund --allow-scripts=@anthropic-ai/claude-code,@qoder-ai/qodercli,droid,openclaw,sharp,@google/genai,tree-sitter-bash,protobufjs \
+  npm install -g --no-audit --no-fund \
+    --allow-scripts=@anthropic-ai/claude-code,@qoder-ai/qodercli,droid,openclaw,sharp,@google/genai,koffi,tree-sitter-bash,protobufjs \
     @openai/codex@0.165.0 \
-    @anthropic-ai/claude-code@2.1.260 \
+    @anthropic-ai/claude-code@2.1.308 \
     droid@0.212.0 \
     openclaw@2026.9.1 \
-    @qoder-ai/qodercli@1.1.63
+    @qoder-ai/qodercli@1.1.63 \
+  && claude --version \
+  && codex --version
 
 USER node
 

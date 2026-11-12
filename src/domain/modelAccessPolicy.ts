@@ -42,7 +42,8 @@ export type ModelAccessDecision =
 export async function evaluateModelAccess(
   policy: ModelAccessPolicy,
   { modelId, resolvedModelId }: ModelAccessTarget,
-  lookups: ModelAccessLookups
+  lookups: ModelAccessLookups,
+  options: { allowAuthorizedComboTarget?: boolean } = {}
 ): Promise<ModelAccessDecision> {
   const { allowedModels, blockedModels, disableNonPublicModels, modelAccessMode } = policy;
   // Allow rules retain the requested alias; deny rules also see the resolved target.
@@ -88,8 +89,11 @@ export async function evaluateModelAccess(
   }
 
   // Restricted + [] is deny-all. Groups can narrow, never expand, this grant.
-  let allowed =
-    !allowedModels || allowedModels.length === 0
+  // Hybrow: an authorized combo target bypasses the per-key allow-list only; block and
+  // group deny rules still apply.
+  let allowed = options.allowAuthorizedComboTarget
+    ? true
+    : !allowedModels || allowedModels.length === 0
       ? modelAccessMode !== "restricted"
       : allowedModels.some((pattern) => modelPatternMatches(pattern, candidates));
 

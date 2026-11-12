@@ -1648,7 +1648,8 @@ export async function getApiKeyMetadata(
 export async function isModelAllowedForKey(
   key: string | null | undefined,
   modelId: string | null | undefined,
-  resolvedModelId?: string | null
+  resolvedModelId?: string | null,
+  options: { allowAuthorizedComboTarget?: boolean } = {}
 ): Promise<boolean> {
   // If no key provided, allow (request may be using different auth method like JWT)
   // If no modelId provided, deny (invalid request)
@@ -1671,7 +1672,11 @@ export async function isModelAllowedForKey(
 
   // Check permission cache
   const cached = getCachedModelPermission(cacheKey, now, catalogGeneration);
-  if (!usesSettingDependentClaudeRouting && cached !== undefined) {
+  if (
+    !options.allowAuthorizedComboTarget &&
+    !usesSettingDependentClaudeRouting &&
+    cached !== undefined
+  ) {
     return cached;
   }
 
@@ -1690,11 +1695,16 @@ export async function isModelAllowedForKey(
       isPublishedModelHidden,
       checkGroupAccess: checkKeyModelAccess,
       isDeniedUnderCanonicalProvider,
-    }
+    },
+    { allowAuthorizedComboTarget: options.allowAuthorizedComboTarget }
   );
 
   // Preserve the cache boundary: early block/publication denials were never cached.
-  if (decision.reason === "permissions" && !usesSettingDependentClaudeRouting) {
+  if (
+    decision.reason === "permissions" &&
+    !options.allowAuthorizedComboTarget &&
+    !usesSettingDependentClaudeRouting
+  ) {
     evictModelPermissionCache();
     setCachedModelPermission(cacheKey, decision.allowed, now, catalogGeneration);
   }
