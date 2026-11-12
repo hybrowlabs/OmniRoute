@@ -65,7 +65,11 @@ test("the distributable pins wreq-js 3.2.0 and carries all nine native lock entr
       /tls-client-node/i,
       `${relativePath} still references tls-client-node`
     );
-    assert.doesNotMatch(source, /\bkoffi\b/i, `${relativePath} still references orphaned koffi`);
+    // Hybrow: the Dockerfile keeps koffi in --allow-scripts, because the globally installed
+    // openclaw CLI depends on it for its native loader (unrelated to the removed tls-client).
+    if (relativePath !== "Dockerfile") {
+      assert.doesNotMatch(source, /\bkoffi\b/i, `${relativePath} still references orphaned koffi`);
+    }
   }
 
   assert.equal(existsSync(join(ROOT, "open-sse/services/tlsClientDownloadDir.ts")), false);
@@ -84,10 +88,25 @@ test("the distributable pins wreq-js 3.2.0 and carries all nine native lock entr
 });
 
 test("persistent sessions and ephemeral transports share one wreq runtime loader", () => {
-  const source = readFileSync(join(ROOT, "open-sse/utils/tlsClient.ts"), "utf8");
+  // The cached loader lives in browserProfiles.ts, which also reads the
+  // profile catalog from it; tlsClient.ts must reuse it, not load its own.
+  const loader = readFileSync(join(ROOT, "open-sse/utils/browserProfiles.ts"), "utf8");
   assert.equal(
-    source.match(/loadRuntimeModule\("wreq-js"\)/g)?.length,
+    loader.match(/loadRuntimeModule\("wreq-js"\)/g)?.length,
     1,
     "wreq-js must be resolved through one cached module loader"
   );
+
+  const source = readFileSync(join(ROOT, "open-sse/utils/tlsClient.ts"), "utf8");
+  assert.doesNotMatch(
+    source,
+    /createRequire|loadRuntimeModule/,
+    "tlsClient.ts loads wreq-js itself"
+  );
+  assert.match(
+    source,
+    /import \{[^}]*\bgetWreqRuntimeModule\b[^}]*\} from "\.\/browserProfiles\.ts";/
+  );
+  // One call for the ephemeral transport pool, one for persistent sessions.
+  assert.equal(source.match(/\bgetWreqRuntimeModule\(\)/g)?.length, 2);
 });

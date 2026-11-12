@@ -14,7 +14,16 @@ const blocksSchema = z
     ])
   )
   .max(512);
-export type ReplayBlocks = z.infer<typeof blocksSchema>;
+// One segment per tool_use: the signed blocks Claude emitted before it (upstream #18607 layout).
+const segmentsSchema = z
+  .array(z.object({ toolUseId: z.string().min(1).max(1024), blocks: blocksSchema }).strict())
+  .max(128);
+const entrySchema = z
+  .object({ connectionId: z.string().max(1024).optional(), segments: segmentsSchema })
+  .strict();
+export type ReplaySegments = z.infer<typeof segmentsSchema>;
+/** Shared payload: the turn layout plus the serving connection (signatures are org-scoped). */
+export type ReplayEntry = z.infer<typeof entrySchema>;
 export type ReplayBinding = { scope: string; provider: string; model: string };
 const bindingSchema = z.object({
   scope: z.string().min(1).max(1024),
@@ -68,8 +77,8 @@ export class ClaudeReplayRedis {
     );
   }
   async write(binding: ReplayBinding, toolIds: string[], input: unknown): Promise<void> {
-    const blocks = blocksSchema.parse(input);
-    const plain = Buffer.from(JSON.stringify(blocks));
+    const entry = entrySchema.parse(input);
+    const plain = Buffer.from(JSON.stringify(entry));
     if (plain.length > MAX_BYTES) throw new Error("Claude replay entry exceeds size limit");
     const ids = z
       .array(z.string().min(1).max(1024))
@@ -96,7 +105,7 @@ export class ClaudeReplayRedis {
       throw new ClaudeReplayError("CLAUDE_REPLAY_UNAVAILABLE");
     }
   }
-  async read(binding: ReplayBinding, toolId: string): Promise<ReplayBlocks> {
+  async read(binding: ReplayBinding, toolId: string): Promise<ReplayEntry> {
     const key = this.key(binding, toolId);
     let sealed: string | null;
     try {
@@ -111,11 +120,15 @@ export class ClaudeReplayRedis {
       const decipher = createDecipheriv("aes-256-gcm", this.secret, data.subarray(0, 12));
       decipher.setAAD(Buffer.from(key));
       decipher.setAuthTag(data.subarray(12, 28));
-      return blocksSchema.parse(
-        JSON.parse(
-          Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString("utf8")
-        )
+      const parsed: unknown = JSON.parse(
+        Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString("utf8")
       );
+      // Entries written before the segment layout (<= 15 minute TTL) are a flat block list;
+      // anchor them on the requested tool_use so they keep replaying in front of it.
+      if (Array.isArray(parsed)) {
+        return { segments: [{ toolUseId: toolId, blocks: blocksSchema.parse(parsed) }] };
+      }
+      return entrySchema.parse(parsed);
     } catch {
       throw new ClaudeReplayError("CLAUDE_REPLAY_CORRUPT");
     }

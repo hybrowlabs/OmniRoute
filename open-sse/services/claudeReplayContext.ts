@@ -3,14 +3,14 @@ import {
   ClaudeReplayError,
   ClaudeReplayRedis,
   type ReplayBinding,
-  type ReplayBlocks,
+  type ReplayEntry,
 } from "./claudeReplayRedis.ts";
 
 type Backend = Pick<ClaudeReplayRedis, "read" | "write" | "remove">;
 export type ClaudeReplayContext = {
   backend: Backend;
   binding: ReplayBinding;
-  entries: Map<string, ReplayBlocks | null>;
+  entries: Map<string, ReplayEntry | null>;
   restored: WeakSet<object>;
   pending: Promise<void>[];
   failure?: ClaudeReplayError;
@@ -58,11 +58,11 @@ export async function withClaudeReplay<T>(
   // Sequential reads bound memory and prevent a large history flooding Redis.
   for (const id of historyToolIds(body)) {
     try {
-      const blocks = await backend.read(binding, id);
-      retainedBytes += Buffer.byteLength(JSON.stringify(blocks));
+      const entry = await backend.read(binding, id);
+      retainedBytes += Buffer.byteLength(JSON.stringify(entry));
       if (retainedBytes > 64 * 1024 * 1024)
         throw new ClaudeReplayError("CLAUDE_REPLAY_UNAVAILABLE");
-      context.entries.set(id, blocks);
+      context.entries.set(id, entry);
     } catch (error) {
       if ((error as { code?: string })?.code !== "CLAUDE_REPLAY_MISSING") throw error;
       context.entries.set(id, null);
@@ -95,7 +95,13 @@ export function hasSharedToolOnlyReply(content: unknown[]): boolean {
   const ids = content
     .filter((b) => (b as { type?: string })?.type === "tool_use")
     .map((b) => (b as { id: string }).id);
-  return ids.length > 0 && ids.every((id) => context.entries.get(id)?.length === 0);
+  return (
+    ids.length > 0 &&
+    ids.every((id) => {
+      const entry = context.entries.get(id);
+      return !!entry && entry.segments.every((segment) => segment.blocks.length === 0);
+    })
+  );
 }
 let backend: Backend | undefined;
 export async function configuredClaudeReplay(): Promise<Backend | undefined> {

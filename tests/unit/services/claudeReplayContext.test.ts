@@ -11,14 +11,21 @@ import {
 } from "../../../open-sse/services/claudeThinkingStore.ts";
 const blocks = [{ type: "thinking" as const, thinking: "", signature: "signed" }];
 const binding = { scope: "key-a", provider: "claude", model: "claude-opus-5-5" };
+const toolUse = { type: "tool_use" as const, id: "toolu_one" };
+// Upstream layout: ordered content, one segment per tool_use (signed blocks before it).
 const args = {
   provider: binding.provider,
   model: binding.model,
-  toolUseIds: ["toolu_one"],
-  blocks,
+  content: [...blocks, toolUse],
 };
+const restoreArgs = {
+  provider: binding.provider,
+  model: binding.model,
+  toolUseIds: ["toolu_one"],
+};
+const segments = [{ toolUseId: "toolu_one", blocks }];
 function backend() {
-  const data = new Map<string, typeof blocks>();
+  const data = new Map<string, unknown>();
   return {
     async write(b, ids, value) {
       for (const id of ids) data.set(b.scope + id, structuredClone(value));
@@ -47,7 +54,7 @@ test("store and restore are connected across independent request contexts", asyn
     binding,
     { input: [{ type: "function_call", call_id: "toolu_one" }] },
     async () => {
-      assert.deepEqual(restoreClaudeThinkingBlocks(args), blocks);
+      assert.deepEqual(restoreClaudeThinkingBlocks(restoreArgs), segments);
     }
   );
 });
@@ -57,7 +64,9 @@ test("missing state errors instead of falling through to local cache or placehol
     binding,
     { input: [{ type: "function_call", call_id: "toolu_one" }] },
     async () => {
-      assert.throws(() => restoreClaudeThinkingBlocks(args), { code: "CLAUDE_REPLAY_MISSING" });
+      assert.throws(() => restoreClaudeThinkingBlocks(restoreArgs), {
+        code: "CLAUDE_REPLAY_MISSING",
+      });
     }
   );
 });
@@ -145,7 +154,7 @@ test("tool-only marker prevents placeholder fabrication in enabled thinking", as
     await import("../../../open-sse/translator/helpers/claudeHelper.ts");
   const store = backend();
   await withClaudeReplay(store, binding, {}, async () => {
-    storeClaudeThinkingBlocks({ ...args, blocks: [] });
+    storeClaudeThinkingBlocks({ ...args, content: [toolUse] });
     await flushClaudeReplay();
   });
   const body = {
@@ -228,7 +237,7 @@ test("signature validation failure remains visible even if a best-effort caller 
     try {
       storeClaudeThinkingBlocks({
         ...args,
-        blocks: [{ type: "thinking", thinking: "x", signature: "" }],
+        content: [{ type: "thinking", thinking: "x", signature: "" }, toolUse],
       });
     } catch {}
     await assert.rejects(flushClaudeReplay(), { code: "CLAUDE_REPLAY_CORRUPT" });
@@ -248,7 +257,7 @@ test("Responses custom-tool calls hydrate the same replay state", async () => {
     binding,
     { input: [{ type: "custom_tool_call", call_id: "toolu_one" }] },
     async () => {
-      assert.deepEqual(restoreClaudeThinkingBlocks(args), blocks);
+      assert.deepEqual(restoreClaudeThinkingBlocks(restoreArgs), segments);
     }
   );
 });
