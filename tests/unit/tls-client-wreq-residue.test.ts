@@ -65,7 +65,11 @@ test("the distributable pins wreq-js 3.2.0 and carries all nine native lock entr
       /tls-client-node/i,
       `${relativePath} still references tls-client-node`
     );
-    assert.doesNotMatch(source, /\bkoffi\b/i, `${relativePath} still references orphaned koffi`);
+    // Hybrow: the Dockerfile keeps koffi in --allow-scripts, because the globally installed
+    // openclaw CLI depends on it for its native loader (unrelated to the removed tls-client).
+    if (relativePath !== "Dockerfile") {
+      assert.doesNotMatch(source, /\bkoffi\b/i, `${relativePath} still references orphaned koffi`);
+    }
   }
 
   assert.equal(existsSync(join(ROOT, "open-sse/services/tlsClientDownloadDir.ts")), false);
