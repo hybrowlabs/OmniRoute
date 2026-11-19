@@ -24,6 +24,7 @@ import { errorResponse, errorResponseWithComboDiagnostics } from "../../utils/er
 import { parseModel } from "../model.ts";
 import { handlePipelineChat, type PipelineStep } from "../pipeline.ts";
 import type { resolveComboSetupConfig } from "../comboConfig.ts";
+import { isTokenRateLimitWording } from "../accountFallback.ts";
 import { clampComboDepth, clampGlobalAttempts, resolveDelayMs } from "./comboPredicates.ts";
 import {
   deriveRequestCompatibilityRequirements,
@@ -103,6 +104,7 @@ type PreludeBaseOptionArgs = {
   sourceFormat?: string | null;
   endpointPath?: string | null;
   requestHeaders?: Headers | Record<string, unknown> | null;
+  requestExcludedModel?: string | null;
 };
 
 /** Rebuild handleComboChat's option bag verbatim for a recursive dispatch. */
@@ -127,6 +129,7 @@ function buildBaseOptions(a: PreludeBaseOptionArgs): HandleComboChatOptions {
     sourceFormat: a.sourceFormat,
     endpointPath: a.endpointPath,
     requestHeaders: a.requestHeaders,
+    requestExcludedModel: a.requestExcludedModel,
   };
 }
 
@@ -224,6 +227,104 @@ function recoveryAborted(recovery: boolean | undefined, signal?: AbortSignal | n
 }
 
 /**
+ * True when the pinned model's 400 is a context overflow: the `context_length_exceeded` /
+ * `context_window_exceeded` error code or type (chatCore's pre-dispatch "Input exceeds context
+ * window" rejection and provider overflow errors), or overflow wording in the message. Reads a
+ * clone, so the original response body stays intact when the 400 is returned to the client.
+ */
+const PINNED_OVERFLOW_CODES = new Set([
+  "context_overflow",
+  "context_length_exceeded",
+  "context_window_exceeded",
+]);
+
+const PINNED_OVERFLOW_TEXT =
+  /\b(?:input (?:is )?too long|prompt is too long|too many tokens|request too large|context (?:window|length) (?:exceeded|overflow)|exceeds context (?:window|length)|context overflow)\b/i;
+
+const PINNED_OVERFLOW_READ_MS = 1000;
+
+function pinnedOverflowText(value: unknown): boolean {
+  if (typeof value !== "string" || isTokenRateLimitWording(value)) return false;
+  return PINNED_OVERFLOW_TEXT.test(value);
+}
+
+function pinnedOverflowRecord(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    PINNED_OVERFLOW_CODES.has(String(record.code ?? "")) ||
+    PINNED_OVERFLOW_CODES.has(String(record.type ?? "")) ||
+    pinnedOverflowText(record.message)
+  );
+}
+
+/**
+ * Read only enough of a cloned 400 body to classify it. The deadline and client
+ * abort release the reader instead of waiting for upstream EOF after the target
+ * dispatch timer has already been cleared.
+ */
+async function readBoundedClone(
+  response: Response,
+  signal?: AbortSignal | null
+): Promise<string | null> {
+  if (!response.body) return null;
+  const reader = response.clone().body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, PINNED_OVERFLOW_READ_MS);
+  });
+  let onAbort: (() => void) | undefined;
+  const abort = new Promise<void>((resolve) => {
+    onAbort = resolve;
+    if (signal?.aborted) resolve();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    while (total < 8192) {
+      const chunk = await Promise.race([reader.read(), deadline, abort]);
+      if (!chunk) return null;
+      if (chunk.done) return new TextDecoder().decode(Buffer.concat(chunks));
+      chunks.push(chunk.value);
+      total += chunk.value.byteLength;
+    }
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    // A tee's cancellation can wait for the original response branch. Do not
+    // await it: cancellation synchronously resolves any outstanding read.
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+async function isPinnedContextOverflow(
+  pinnedResult: Response,
+  signal?: AbortSignal | null
+): Promise<boolean> {
+  if (signal?.aborted) return false;
+  try {
+    const text = await readBoundedClone(pinnedResult, signal);
+    if (!text) return false;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return pinnedOverflowText(text);
+    }
+    const body = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    return (
+      pinnedOverflowRecord(body?.error) || pinnedOverflowRecord(body) || pinnedOverflowText(text)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Decide whether the honored pin's response is good enough to return as-is.
  * Returns the response to serve it, or null to fall through to the combo
  * strategy (200-but-empty, or a transient upstream status worth failing over).
@@ -238,6 +339,7 @@ async function evaluatePinnedResponse(args: {
   log: ComboLogger;
   preContentTransportRecovery?: boolean;
   signal?: AbortSignal | null;
+  onContextOverflow?: (model: string) => void;
 }): Promise<Response | null> {
   const {
     body,
@@ -287,6 +389,26 @@ async function evaluatePinnedResponse(args: {
   }
   const pinnedStatus = pinnedResult.status || 500;
   if (![401, 408, 429, 500, 502, 503, 504].includes(pinnedStatus)) {
+    // A prompt that no longer fits the pinned model's window is a property of the
+    // pin, not of the request: the other combo targets may have a larger window.
+    // Drop the pin so the strategy picks one; the target that serves the turn then
+    // becomes the new pin (recordSessionModelUsage). Any other 400 stays terminal.
+    if (pinnedStatus === 400) {
+      const overflow = await isPinnedContextOverflow(pinnedResult, signal);
+      if (signal?.aborted) {
+        void pinnedResult.body?.cancel().catch(() => {});
+        return errorResponse(499, "Client disconnected");
+      }
+      if (overflow) {
+        void pinnedResult.body?.cancel().catch(() => {});
+        args.onContextOverflow?.(pinnedModel);
+        log.warn(
+          "COMBO",
+          `Pinned model ${pinnedModel} rejected the prompt as too large for its context window, dropping pin and falling through to combo targets`
+        );
+        return null;
+      }
+    }
     return pinnedResult;
   }
   log.warn(
@@ -311,6 +433,7 @@ async function dispatchHonoredPin(args: {
   log: ComboLogger;
   preContentTransportRecovery: boolean;
   signal?: AbortSignal | null;
+  onContextOverflow?: (model: string) => void;
 }): Promise<Response | null> {
   const {
     body,
@@ -363,6 +486,7 @@ async function dispatchHonoredPin(args: {
       pinnedResult,
       pinnedModel,
       hasOtherTargets: comboTargets.length > 1,
+      onContextOverflow: args.onContextOverflow,
       clientRequestedStream,
       config,
       log,
@@ -391,6 +515,7 @@ export async function tryPinnedModelDispatch(args: {
   hiddenModelsByProvider?: HiddenModelsByProvider;
   preContentTransportRecovery?: boolean;
   signal?: AbortSignal | null;
+  onContextOverflow?: (model: string) => void;
 }): Promise<Response | null> {
   const {
     body,
@@ -478,6 +603,7 @@ export async function tryPinnedModelDispatch(args: {
       log,
       preContentTransportRecovery,
       signal,
+      onContextOverflow: args.onContextOverflow,
     });
     if (honored) return honored;
     // Fall through to the target iteration loop below — retries and sibling
@@ -526,6 +652,7 @@ export async function tryFusionDispatch(args: {
   endpointPath?: string | null;
   requestHeaders?: Headers | Record<string, unknown> | null;
   runCombo: RunCombo;
+  requestExcludedModel?: string | null;
 }): Promise<Response | null> {
   const { cfg, combo, config, strategy, log } = args;
   const configuredJudge = typeof cfg.judgeModel === "string" ? cfg.judgeModel : undefined;
@@ -555,6 +682,7 @@ export async function tryFusionDispatch(args: {
   // dispatching a model the operator hid.
   const judgeModel =
     configuredJudge &&
+    configuredJudge !== args.requestExcludedModel &&
     !judgeLacksConfirmedVision &&
     isComboModelVisible(configuredJudge, null, args.hiddenModelsByProvider)
       ? configuredJudge
@@ -583,6 +711,11 @@ export async function tryFusionDispatch(args: {
   // modelStr -- the first healthy connection), so the panel size is unchanged;
   // only each member's connectionId becomes a vetted, non-exhausted account.
   const expansionExclusions: PreDispatchExclusion[] = [];
+  if (args.requestExcludedModel) {
+    allResolvedFusionTargets = allResolvedFusionTargets.filter(
+      (target) => target.modelStr !== args.requestExcludedModel
+    );
+  }
   allResolvedFusionTargets = await expandTargetsForAllStrategies({
     strategy,
     targets: allResolvedFusionTargets,
@@ -593,6 +726,11 @@ export async function tryFusionDispatch(args: {
     apiKeyAllowedConnectionIds: args.apiKeyAllowedConnections ?? null,
     exclusions: expansionExclusions,
   });
+  if (args.requestExcludedModel) {
+    allResolvedFusionTargets = allResolvedFusionTargets.filter(
+      (target) => target.modelStr !== args.requestExcludedModel
+    );
+  }
   // Preserve transient expansion failures before the empty-panel validation.
   if (allResolvedFusionTargets.length === 0) {
     const coolingDown = buildAllTargetsCoolingDownResponse(expansionExclusions);
@@ -715,6 +853,7 @@ type PipelineDispatchArgs = {
   handleSingleModelWithTimeout: HandleSingleModel;
   log: ComboLogger;
   hiddenModelsByProvider?: HiddenModelsByProvider;
+  requestExcludedModel?: string | null;
 };
 
 /** Dispatch a configured pipeline through the shared target compatibility checks. */
@@ -730,6 +869,7 @@ export async function tryPipelineDispatch(args: PipelineDispatchArgs): Promise<R
     handleSingleModelWithTimeout,
     log,
     hiddenModelsByProvider,
+    requestExcludedModel,
   } = args;
   if (getStrategyTraits(strategy).dispatchPrelude !== "pipeline") return null;
   const resolvedTargets = resolveComboTargets(
@@ -737,7 +877,7 @@ export async function tryPipelineDispatch(args: PipelineDispatchArgs): Promise<R
     allCombos,
     clampComboDepth(config.maxComboDepth),
     hiddenModelsByProvider
-  );
+  ).filter((target) => !requestExcludedModel || target.modelStr !== requestExcludedModel);
   const expansionExclusions: PreDispatchExclusion[] = [];
   const expanded = await expandTargetsForAllStrategies({
     strategy,
@@ -760,6 +900,7 @@ export async function tryPipelineDispatch(args: PipelineDispatchArgs): Promise<R
   const seenSteps = new Set<string>();
   const pipelineTargets: typeof expanded = [];
   for (const target of expanded) {
+    if (requestExcludedModel && target.modelStr === requestExcludedModel) continue;
     const key = target.stepId ?? target.modelStr;
     if (!seenSteps.has(key)) {
       seenSteps.add(key);
@@ -904,6 +1045,7 @@ type RuntimeUnitDispatchArgs = {
   sourceFormat?: string | null;
   endpointPath?: string | null;
   requestHeaders?: Headers | Record<string, unknown> | null;
+  requestExcludedModel?: string | null;
   runCombo: RunCombo;
 };
 
@@ -923,7 +1065,7 @@ export async function tryRuntimeUnitDispatch(
           "execute",
           nestingContext.maxDepth,
           args.hiddenModelsByProvider
-        )
+        ).filter((unit) => unit.kind !== "model" || unit.modelStr !== args.requestExcludedModel)
       : [];
   const hasExecutableComboRef = executeModeUnits.some((unit) => unit.kind === "combo-ref");
   // Only the simple execute strategies (priority / round-robin / random / strict-random /
