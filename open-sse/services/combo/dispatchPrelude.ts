@@ -24,7 +24,13 @@ import { errorResponse, errorResponseWithComboDiagnostics } from "../../utils/er
 import { parseModel } from "../model.ts";
 import { handlePipelineChat, type PipelineStep } from "../pipeline.ts";
 import type { resolveComboSetupConfig } from "../comboConfig.ts";
-import { clampComboDepth, clampGlobalAttempts, resolveDelayMs } from "./comboPredicates.ts";
+import { readAttemptFailure } from "./attemptFailure.ts";
+import {
+  clampComboDepth,
+  clampGlobalAttempts,
+  isContextOverflowFailure,
+  resolveDelayMs,
+} from "./comboPredicates.ts";
 import {
   deriveRequestCompatibilityRequirements,
   isVisionIncompatibleTarget,
@@ -224,6 +230,29 @@ function recoveryAborted(recovery: boolean | undefined, signal?: AbortSignal | n
 }
 
 /**
+ * True when the pinned model's 400 is a context overflow: the `context_length_exceeded` /
+ * `context_window_exceeded` error code or type (chatCore's pre-dispatch "Input exceeds context
+ * window" rejection and provider overflow errors), or overflow wording in the message. Reads a
+ * clone, so the original response body stays intact when the 400 is returned to the client.
+ */
+async function isPinnedContextOverflow(
+  pinnedResult: Response,
+  pinnedModel: string,
+  log: ComboLogger
+): Promise<boolean> {
+  try {
+    const failure = await readAttemptFailure(pinnedResult, { log, modelStr: pinnedModel });
+    return (
+      failure.structuredError?.code === "context_overflow" ||
+      failure.structuredError?.type === "context_overflow" ||
+      isContextOverflowFailure(failure.errorText, failure.structuredError)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Decide whether the honored pin's response is good enough to return as-is.
  * Returns the response to serve it, or null to fall through to the combo
  * strategy (200-but-empty, or a transient upstream status worth failing over).
@@ -287,6 +316,18 @@ async function evaluatePinnedResponse(args: {
   }
   const pinnedStatus = pinnedResult.status || 500;
   if (![401, 408, 429, 500, 502, 503, 504].includes(pinnedStatus)) {
+    // A prompt that no longer fits the pinned model's window is a property of the
+    // pin, not of the request: the other combo targets may have a larger window.
+    // Drop the pin so the strategy picks one; the target that serves the turn then
+    // becomes the new pin (recordSessionModelUsage). Any other 400 stays terminal.
+    if (pinnedStatus === 400 && (await isPinnedContextOverflow(pinnedResult, pinnedModel, log))) {
+      void pinnedResult.body?.cancel().catch(() => {});
+      log.warn(
+        "COMBO",
+        `Pinned model ${pinnedModel} rejected the prompt as too large for its context window, dropping pin and falling through to combo targets`
+      );
+      return null;
+    }
     return pinnedResult;
   }
   log.warn(
