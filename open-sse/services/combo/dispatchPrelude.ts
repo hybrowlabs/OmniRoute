@@ -104,6 +104,7 @@ type PreludeBaseOptionArgs = {
   sourceFormat?: string | null;
   endpointPath?: string | null;
   requestHeaders?: Headers | Record<string, unknown> | null;
+  requestExcludedModel?: string | null;
 };
 
 /** Rebuild handleComboChat's option bag verbatim for a recursive dispatch. */
@@ -128,6 +129,7 @@ function buildBaseOptions(a: PreludeBaseOptionArgs): HandleComboChatOptions {
     sourceFormat: a.sourceFormat,
     endpointPath: a.endpointPath,
     requestHeaders: a.requestHeaders,
+    requestExcludedModel: a.requestExcludedModel,
   };
 }
 
@@ -650,6 +652,7 @@ export async function tryFusionDispatch(args: {
   endpointPath?: string | null;
   requestHeaders?: Headers | Record<string, unknown> | null;
   runCombo: RunCombo;
+  requestExcludedModel?: string | null;
 }): Promise<Response | null> {
   const { cfg, combo, config, strategy, log } = args;
   const configuredJudge = typeof cfg.judgeModel === "string" ? cfg.judgeModel : undefined;
@@ -679,6 +682,7 @@ export async function tryFusionDispatch(args: {
   // dispatching a model the operator hid.
   const judgeModel =
     configuredJudge &&
+    configuredJudge !== args.requestExcludedModel &&
     !judgeLacksConfirmedVision &&
     isComboModelVisible(configuredJudge, null, args.hiddenModelsByProvider)
       ? configuredJudge
@@ -707,6 +711,11 @@ export async function tryFusionDispatch(args: {
   // modelStr -- the first healthy connection), so the panel size is unchanged;
   // only each member's connectionId becomes a vetted, non-exhausted account.
   const expansionExclusions: PreDispatchExclusion[] = [];
+  if (args.requestExcludedModel) {
+    allResolvedFusionTargets = allResolvedFusionTargets.filter(
+      (target) => target.modelStr !== args.requestExcludedModel
+    );
+  }
   allResolvedFusionTargets = await expandTargetsForAllStrategies({
     strategy,
     targets: allResolvedFusionTargets,
@@ -717,6 +726,11 @@ export async function tryFusionDispatch(args: {
     apiKeyAllowedConnectionIds: args.apiKeyAllowedConnections ?? null,
     exclusions: expansionExclusions,
   });
+  if (args.requestExcludedModel) {
+    allResolvedFusionTargets = allResolvedFusionTargets.filter(
+      (target) => target.modelStr !== args.requestExcludedModel
+    );
+  }
   // Preserve transient expansion failures before the empty-panel validation.
   if (allResolvedFusionTargets.length === 0) {
     const coolingDown = buildAllTargetsCoolingDownResponse(expansionExclusions);
@@ -839,6 +853,7 @@ type PipelineDispatchArgs = {
   handleSingleModelWithTimeout: HandleSingleModel;
   log: ComboLogger;
   hiddenModelsByProvider?: HiddenModelsByProvider;
+  requestExcludedModel?: string | null;
 };
 
 /** Dispatch a configured pipeline through the shared target compatibility checks. */
@@ -854,6 +869,7 @@ export async function tryPipelineDispatch(args: PipelineDispatchArgs): Promise<R
     handleSingleModelWithTimeout,
     log,
     hiddenModelsByProvider,
+    requestExcludedModel,
   } = args;
   if (getStrategyTraits(strategy).dispatchPrelude !== "pipeline") return null;
   const resolvedTargets = resolveComboTargets(
@@ -861,7 +877,7 @@ export async function tryPipelineDispatch(args: PipelineDispatchArgs): Promise<R
     allCombos,
     clampComboDepth(config.maxComboDepth),
     hiddenModelsByProvider
-  );
+  ).filter((target) => !requestExcludedModel || target.modelStr !== requestExcludedModel);
   const expansionExclusions: PreDispatchExclusion[] = [];
   const expanded = await expandTargetsForAllStrategies({
     strategy,
@@ -884,6 +900,7 @@ export async function tryPipelineDispatch(args: PipelineDispatchArgs): Promise<R
   const seenSteps = new Set<string>();
   const pipelineTargets: typeof expanded = [];
   for (const target of expanded) {
+    if (requestExcludedModel && target.modelStr === requestExcludedModel) continue;
     const key = target.stepId ?? target.modelStr;
     if (!seenSteps.has(key)) {
       seenSteps.add(key);
@@ -1028,6 +1045,7 @@ type RuntimeUnitDispatchArgs = {
   sourceFormat?: string | null;
   endpointPath?: string | null;
   requestHeaders?: Headers | Record<string, unknown> | null;
+  requestExcludedModel?: string | null;
   runCombo: RunCombo;
 };
 
@@ -1047,7 +1065,7 @@ export async function tryRuntimeUnitDispatch(
           "execute",
           nestingContext.maxDepth,
           args.hiddenModelsByProvider
-        )
+        ).filter((unit) => unit.kind !== "model" || unit.modelStr !== args.requestExcludedModel)
       : [];
   const hasExecutableComboRef = executeModeUnits.some((unit) => unit.kind === "combo-ref");
   // Only the simple execute strategies (priority / round-robin / random / strict-random /

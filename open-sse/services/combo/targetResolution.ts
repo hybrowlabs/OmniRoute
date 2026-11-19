@@ -889,6 +889,7 @@ export async function resolveComboTargetPipeline(
     apiKeyAllowedConnectionIds: deps.apiKeyAllowedConnections,
     exclusions: expansionExclusions,
   });
+  orderedTargets = excludeOverflowModel(orderedTargets);
   // Classify at the expansion boundary: later filters may empty a surviving
   // pool for unrelated reasons and must retain their own error contracts.
   if (orderedTargets.length === 0) {

@@ -151,6 +151,51 @@ for (const message of [
   });
 }
 
+test("nested execute mode excludes the overflowing pin before dispatching the child", async () => {
+  const name = `nested-${Math.random().toString(36).slice(2, 8)}`;
+  const child = {
+    name: `${name}-child`,
+    strategy: "priority",
+    models: [{ model: LARGE }],
+    config: { maxRetries: 0, retryDelayMs: 0, fallbackDelayMs: 0, maxGlobalAttempts: 1 },
+  };
+  const combo = {
+    name,
+    strategy: "priority",
+    context_cache_protection: 1,
+    models: [{ model: SMALL }, { kind: "combo-ref", comboName: child.name }],
+    config: {
+      maxRetries: 0,
+      retryDelayMs: 0,
+      fallbackDelayMs: 0,
+      maxGlobalAttempts: 1,
+      nestedComboMode: "execute",
+    },
+  };
+  const sessionId = `${name}-session`;
+  recordSessionModelUsage(sessionId, name, SMALL, "cursor");
+  const calls: string[] = [];
+  const response = await handleComboChat({
+    combo,
+    allCombos: [combo, child],
+    relayOptions: { sessionId },
+    body: { stream: false, messages: [{ role: "user", content: "a 300k token prompt" }] },
+    hiddenModelsByProvider: new Map(),
+    isModelAvailable: async () => true,
+    log,
+    handleSingleModel: async (_body, model) => {
+      calls.push(model);
+      return model === SMALL
+        ? overflow400("too large", "context_overflow")
+        : Response.json({ choices: [{ message: { content: "served by the child" } }] });
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, [SMALL, LARGE], "the nested child is reached without retrying the pin");
+  assert.equal(getLastSessionModel(sessionId, child.name), LARGE);
+  await response.text();
+});
+
 test("round-robin excludes the overflowing pin before rotating and re-pins the larger target", async () => {
   const { response, calls, pinnedAfter } = await pinnedTurn(
     overflow400("too large", "context_overflow"),

@@ -260,6 +260,9 @@ export async function handleRoundRobinCombo({
     apiKeyAllowedConnectionIds: apiKeyAllowedConnections,
     exclusions: expansionExclusions,
   });
+  if (requestExcludedModel) {
+    orderedTargets = orderedTargets.filter((target) => target.modelStr !== requestExcludedModel);
+  }
   // Classify at the expansion boundary: later filters may empty a surviving
   // pool for unrelated reasons and must retain their own error contracts.
   if (orderedTargets.length === 0) {
@@ -1100,7 +1103,7 @@ export async function handleRoundRobinCombo({
                 combo.name,
                 modelStr,
                 provider,
-                target.connectionId ?? undefined
+                effectiveConnectionId || target.connectionId || undefined
               );
             }
             // Clone is consumed by quality check; original stays unlocked.

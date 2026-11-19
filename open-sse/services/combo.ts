@@ -915,6 +915,7 @@ async function handleComboChatInner({
     sourceFormat,
     endpointPath,
     requestHeaders,
+    requestExcludedModel: overflowExcludedModel,
     runCombo: handleComboChat,
   });
   if (fusionDispatch) return fusionDispatch;
@@ -934,7 +935,9 @@ async function handleComboChatInner({
       allCombos,
       clampComboDepth(config.maxComboDepth),
       hiddenModelsByProvider
-    ).map((target) => target.modelStr),
+    )
+      .filter((target) => !overflowExcludedModel || target.modelStr !== overflowExcludedModel)
+      .map((target) => target.modelStr),
     comboName: combo.name,
     body,
     handleSingleModel: chaosHeaders?.handleSingleModel ?? handleSingleModelWithTimeout,
@@ -958,6 +961,7 @@ async function handleComboChatInner({
     handleSingleModelWithTimeout,
     log,
     hiddenModelsByProvider,
+    requestExcludedModel: overflowExcludedModel,
   });
   if (pipelineDispatch) return pipelineDispatch;
 
@@ -983,6 +987,7 @@ async function handleComboChatInner({
     sourceFormat,
     endpointPath,
     requestHeaders,
+    requestExcludedModel: overflowExcludedModel,
     runCombo: handleComboChat,
   });
   if (runtimeUnitDispatch) return runtimeUnitDispatch;
