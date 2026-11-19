@@ -66,6 +66,8 @@ import {
   type ResilienceSettings,
 } from "../../../src/lib/resilience/settings";
 import { resolveReasoningBufferedMaxTokens, toPositiveInteger } from "../reasoningTokenBuffer.ts";
+import { recordSessionModelUsage } from "../../../src/lib/db/contextHandoffs.ts";
+import { SKIP_UNIVERSAL_HANDOFF_FLAG } from "../contextHandoff.ts";
 import type {
   ComboLike,
   ComboRetryAfter,
@@ -189,6 +191,8 @@ export async function handleRoundRobinCombo({
   relayOptions,
   perTargetAdmission = null,
   heldAttempt = {},
+  requestExcludedModel = null,
+  contextCacheSessionId = null,
 }: HandleRoundRobinOptions): Promise<Response> {
   const config = settings
     ? resolveComboConfig(combo, settings)
@@ -261,6 +265,9 @@ export async function handleRoundRobinCombo({
   if (orderedTargets.length === 0) {
     const coolingDown = buildAllTargetsCoolingDownResponse(expansionExclusions);
     if (coolingDown) return coolingDown;
+  }
+  if (requestExcludedModel) {
+    orderedTargets = orderedTargets.filter((target) => target.modelStr !== requestExcludedModel);
   }
   const tagFilteredTargets = await applyRequestTagRouting(orderedTargets, body, log);
   const evalRankedTargets = orderTargetsByEvalScores(tagFilteredTargets, config.evalRouting, log);
@@ -1080,6 +1087,21 @@ export async function handleRoundRobinCombo({
                 log,
                 tag: "COMBO-RR",
               });
+            }
+            // Match the common attempt path: the model that actually served this turn
+            // becomes the next context-cache pin. Round-robin has no success recorder.
+            if (
+              combo.context_cache_protection &&
+              contextCacheSessionId &&
+              !(body as Record<string, unknown>)?.[SKIP_UNIVERSAL_HANDOFF_FLAG]
+            ) {
+              recordSessionModelUsage(
+                contextCacheSessionId,
+                combo.name,
+                modelStr,
+                provider,
+                target.connectionId ?? undefined
+              );
             }
             // Clone is consumed by quality check; original stays unlocked.
             return result;

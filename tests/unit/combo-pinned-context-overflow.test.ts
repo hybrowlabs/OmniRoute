@@ -54,15 +54,19 @@ test.after(async () => {
  * model rejects as too large. Returns the served response, the models dispatched
  * in order, and the model the session is pinned to afterwards.
  */
-async function pinnedTurn(pinnedRejection: Response, largerResponse: Response) {
+async function pinnedTurn(
+  pinnedRejection: Response,
+  largerResponse: Response,
+  options: { strategy?: string; signal?: AbortSignal } = {}
+) {
   const name = `overflow-${Math.random().toString(36).slice(2, 8)}`;
   const combo = {
     name,
-    strategy: "priority",
+    strategy: options.strategy ?? "priority",
     context_cache_protection: 1,
-    // Priority prefers the larger target, but a prior-turn pin overrides it.
-    models: [{ model: LARGE }, { model: SMALL }],
-    config: { maxRetries: 0, retryDelayMs: 0, fallbackDelayMs: 0, maxGlobalAttempts: 2 },
+    // The smaller target comes first: the strategy must not select it again.
+    models: [{ model: SMALL }, { model: LARGE }],
+    config: { maxRetries: 0, retryDelayMs: 0, fallbackDelayMs: 0, maxGlobalAttempts: 1 },
   };
   const sessionId = `${name}-session`;
   recordSessionModelUsage(sessionId, name, SMALL, "cursor");
@@ -73,6 +77,7 @@ async function pinnedTurn(pinnedRejection: Response, largerResponse: Response) {
     combo,
     allCombos: [combo],
     relayOptions: { sessionId },
+    signal: options.signal,
     body: { stream: false, messages: [{ role: "user", content: "a 300k token prompt" }] },
     hiddenModelsByProvider: new Map(),
     isModelAvailable: async () => true,
@@ -129,3 +134,68 @@ test("a pinned 400 that is not a context overflow stays terminal and keeps the p
   const body = await response.json();
   assert.match(JSON.stringify(body), /tool name is malformed/);
 });
+
+for (const message of [
+  "max_tokens must be a positive integer",
+  "context window must be a positive integer",
+  "maximum input tokens per minute exceeded",
+]) {
+  test(`parameter/rate validation stays terminal: ${message}`, async () => {
+    const rejection = overflow400(message, "invalid_request");
+    const expectedBody = await rejection.clone().text();
+    const { response, calls, pinnedAfter } = await pinnedTurn(rejection, Response.json({}));
+    assert.equal(response.status, 400);
+    assert.deepEqual(calls, [SMALL]);
+    assert.equal(pinnedAfter, SMALL);
+    assert.equal(await response.text(), expectedBody);
+  });
+}
+
+test("round-robin excludes the overflowing pin before rotating and re-pins the larger target", async () => {
+  const { response, calls, pinnedAfter } = await pinnedTurn(
+    overflow400("too large", "context_overflow"),
+    Response.json({ choices: [{ message: { content: "ok" } }] }),
+    { strategy: "round-robin" }
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, [SMALL, LARGE]);
+  assert.equal(pinnedAfter, LARGE);
+  await response.text();
+});
+
+for (const abort of [false, true]) {
+  test(`incomplete pinned 400 body is bounded (abort=${abort})`, async () => {
+    const client = new AbortController();
+    let upstream: ReadableStreamDefaultController<Uint8Array>;
+    const rejection = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          upstream = controller;
+          controller.enqueue(new TextEncoder().encode('{"error":'));
+        },
+      }),
+      { status: 400 }
+    );
+    const turn = pinnedTurn(rejection, Response.json({}), { signal: client.signal });
+    const abortTimer = abort ? setTimeout(() => client.abort(), 30) : null;
+    // Always close the source so a failing baseline test cannot hang the runner.
+    const cleanupTimer = setTimeout(() => upstream.close(), 1800);
+    const started = Date.now();
+    try {
+      const { response, calls, pinnedAfter } = await turn;
+      assert.ok(Date.now() - started < 1500, "classification must not wait for upstream EOF");
+      assert.equal(response.status, abort ? 499 : 400);
+      assert.deepEqual(calls, [SMALL]);
+      assert.equal(pinnedAfter, SMALL);
+      void response.body?.cancel().catch(() => {});
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
+      clearTimeout(cleanupTimer);
+      try {
+        upstream.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  });
+}

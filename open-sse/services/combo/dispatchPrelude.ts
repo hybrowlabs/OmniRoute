@@ -24,13 +24,8 @@ import { errorResponse, errorResponseWithComboDiagnostics } from "../../utils/er
 import { parseModel } from "../model.ts";
 import { handlePipelineChat, type PipelineStep } from "../pipeline.ts";
 import type { resolveComboSetupConfig } from "../comboConfig.ts";
-import { readAttemptFailure } from "./attemptFailure.ts";
-import {
-  clampComboDepth,
-  clampGlobalAttempts,
-  isContextOverflowFailure,
-  resolveDelayMs,
-} from "./comboPredicates.ts";
+import { isTokenRateLimitWording } from "../accountFallback.ts";
+import { clampComboDepth, clampGlobalAttempts, resolveDelayMs } from "./comboPredicates.ts";
 import {
   deriveRequestCompatibilityRequirements,
   isVisionIncompatibleTarget,
@@ -235,17 +230,92 @@ function recoveryAborted(recovery: boolean | undefined, signal?: AbortSignal | n
  * window" rejection and provider overflow errors), or overflow wording in the message. Reads a
  * clone, so the original response body stays intact when the 400 is returned to the client.
  */
+const PINNED_OVERFLOW_CODES = new Set([
+  "context_overflow",
+  "context_length_exceeded",
+  "context_window_exceeded",
+]);
+
+const PINNED_OVERFLOW_TEXT =
+  /\b(?:input (?:is )?too long|prompt is too long|too many tokens|request too large|context (?:window|length) (?:exceeded|overflow)|exceeds context (?:window|length)|context overflow)\b/i;
+
+const PINNED_OVERFLOW_READ_MS = 1000;
+
+function pinnedOverflowText(value: unknown): boolean {
+  if (typeof value !== "string" || isTokenRateLimitWording(value)) return false;
+  return PINNED_OVERFLOW_TEXT.test(value);
+}
+
+function pinnedOverflowRecord(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    PINNED_OVERFLOW_CODES.has(String(record.code ?? "")) ||
+    PINNED_OVERFLOW_CODES.has(String(record.type ?? "")) ||
+    pinnedOverflowText(record.message)
+  );
+}
+
+/**
+ * Read only enough of a cloned 400 body to classify it. The deadline and client
+ * abort release the reader instead of waiting for upstream EOF after the target
+ * dispatch timer has already been cleared.
+ */
+async function readBoundedClone(
+  response: Response,
+  signal?: AbortSignal | null
+): Promise<string | null> {
+  if (!response.body) return null;
+  const reader = response.clone().body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, PINNED_OVERFLOW_READ_MS);
+  });
+  let onAbort: (() => void) | undefined;
+  const abort = new Promise<void>((resolve) => {
+    onAbort = resolve;
+    if (signal?.aborted) resolve();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    while (total < 8192) {
+      const chunk = await Promise.race([reader.read(), deadline, abort]);
+      if (!chunk) return null;
+      if (chunk.done) return new TextDecoder().decode(Buffer.concat(chunks));
+      chunks.push(chunk.value);
+      total += chunk.value.byteLength;
+    }
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    // A tee's cancellation can wait for the original response branch. Do not
+    // await it: cancellation synchronously resolves any outstanding read.
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function isPinnedContextOverflow(
   pinnedResult: Response,
-  pinnedModel: string,
-  log: ComboLogger
+  signal?: AbortSignal | null
 ): Promise<boolean> {
+  if (signal?.aborted) return false;
   try {
-    const failure = await readAttemptFailure(pinnedResult, { log, modelStr: pinnedModel });
+    const text = await readBoundedClone(pinnedResult, signal);
+    if (!text) return false;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return pinnedOverflowText(text);
+    }
+    const body = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
     return (
-      failure.structuredError?.code === "context_overflow" ||
-      failure.structuredError?.type === "context_overflow" ||
-      isContextOverflowFailure(failure.errorText, failure.structuredError)
+      pinnedOverflowRecord(body?.error) || pinnedOverflowRecord(body) || pinnedOverflowText(text)
     );
   } catch {
     return false;
@@ -267,6 +337,7 @@ async function evaluatePinnedResponse(args: {
   log: ComboLogger;
   preContentTransportRecovery?: boolean;
   signal?: AbortSignal | null;
+  onContextOverflow?: (model: string) => void;
 }): Promise<Response | null> {
   const {
     body,
@@ -320,13 +391,21 @@ async function evaluatePinnedResponse(args: {
     // pin, not of the request: the other combo targets may have a larger window.
     // Drop the pin so the strategy picks one; the target that serves the turn then
     // becomes the new pin (recordSessionModelUsage). Any other 400 stays terminal.
-    if (pinnedStatus === 400 && (await isPinnedContextOverflow(pinnedResult, pinnedModel, log))) {
-      void pinnedResult.body?.cancel().catch(() => {});
-      log.warn(
-        "COMBO",
-        `Pinned model ${pinnedModel} rejected the prompt as too large for its context window, dropping pin and falling through to combo targets`
-      );
-      return null;
+    if (pinnedStatus === 400) {
+      const overflow = await isPinnedContextOverflow(pinnedResult, signal);
+      if (signal?.aborted) {
+        void pinnedResult.body?.cancel().catch(() => {});
+        return errorResponse(499, "Client disconnected");
+      }
+      if (overflow) {
+        void pinnedResult.body?.cancel().catch(() => {});
+        args.onContextOverflow?.(pinnedModel);
+        log.warn(
+          "COMBO",
+          `Pinned model ${pinnedModel} rejected the prompt as too large for its context window, dropping pin and falling through to combo targets`
+        );
+        return null;
+      }
     }
     return pinnedResult;
   }
@@ -352,6 +431,7 @@ async function dispatchHonoredPin(args: {
   log: ComboLogger;
   preContentTransportRecovery: boolean;
   signal?: AbortSignal | null;
+  onContextOverflow?: (model: string) => void;
 }): Promise<Response | null> {
   const {
     body,
@@ -404,6 +484,7 @@ async function dispatchHonoredPin(args: {
       pinnedResult,
       pinnedModel,
       hasOtherTargets: comboTargets.length > 1,
+      onContextOverflow: args.onContextOverflow,
       clientRequestedStream,
       config,
       log,
@@ -432,6 +513,7 @@ export async function tryPinnedModelDispatch(args: {
   hiddenModelsByProvider?: HiddenModelsByProvider;
   preContentTransportRecovery?: boolean;
   signal?: AbortSignal | null;
+  onContextOverflow?: (model: string) => void;
 }): Promise<Response | null> {
   const {
     body,
@@ -519,6 +601,7 @@ export async function tryPinnedModelDispatch(args: {
       log,
       preContentTransportRecovery,
       signal,
+      onContextOverflow: args.onContextOverflow,
     });
     if (honored) return honored;
     // Fall through to the target iteration loop below — retries and sibling

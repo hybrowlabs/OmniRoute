@@ -121,6 +121,8 @@ export interface ResolveComboTargetPipelineDeps {
    */
   buildAutoCandidates: ResolveAutoStrategyDeps["buildAutoCandidates"];
   hiddenModelsByProvider?: HiddenModelsByProvider;
+  /** Request-scoped model rejected by its pin; never eligible again on this request. */
+  requestExcludedModel?: string | null;
 }
 
 export interface ResolvedComboTargetPipeline {
@@ -854,14 +856,20 @@ export async function resolveComboTargetPipeline(
   const getWeightedStepKeyForTarget = buildWeightedStepKeyMapper(weightedResolution);
   const weightedExhaustion = buildWeightedExhaustionResponse(deps, weightedResolution, exclusions);
   if (weightedExhaustion) return { earlyResponse: weightedExhaustion };
-  let orderedTargets = traits.weightedSteps
-    ? weightedResolution?.orderedTargets || []
-    : resolveComboTargets(
-        expandedCombo,
-        expandedAllCombos,
-        clampComboDepth(config.maxComboDepth),
-        deps.hiddenModelsByProvider
-      );
+  const excludeOverflowModel = (targets: ResolvedComboTarget[]) =>
+    deps.requestExcludedModel
+      ? targets.filter((target) => target.modelStr !== deps.requestExcludedModel)
+      : targets;
+  let orderedTargets = excludeOverflowModel(
+    traits.weightedSteps
+      ? weightedResolution?.orderedTargets || []
+      : resolveComboTargets(
+          expandedCombo,
+          expandedAllCombos,
+          clampComboDepth(config.maxComboDepth),
+          deps.hiddenModelsByProvider
+        )
+  );
 
   orderedTargets = await applyRequestTagRouting(orderedTargets, body, log);
 
