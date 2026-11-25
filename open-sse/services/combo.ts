@@ -11,6 +11,7 @@ import { createChaosHeaderBarrier } from "./combo/chaosHeaderBarrier.ts";
 import { runComboWithSafetyLatch } from "./combo/safetyStopLatch.ts";
 
 import { recordComboFailure } from "./combo/failureTracker.ts";
+import { deleteSessionModelHistory } from "../../src/lib/db/contextHandoffs.ts";
 import { buildRecoveryHint } from "./combo/pinRecovery.ts";
 import { buildTargetTimeoutRunner } from "./combo/targetTimeoutRunner.ts";
 import { costKey, resolvePoolCosts } from "./combo/candidateCost.ts";
@@ -810,6 +811,7 @@ async function handleComboChatInner({
   nesting = null,
   hiddenModelsByProvider,
   clientManagedResponsesContext = false,
+  requestExcludedModel = null,
   perTargetAdmission = null,
   deferContextOverflowWhenCompressible = false,
   compressionExclusions,
@@ -867,6 +869,7 @@ async function handleComboChatInner({
   // falls through to the target iteration loop below. Implementations live in
   // combo/dispatchPrelude.ts; only the chaos + round-robin hand-offs are short
   // enough to stay inline.
+  let overflowExcludedModel = requestExcludedModel;
   if (pinnedModel) {
     const pinnedDispatch = await tryPinnedModelDispatch({
       body,
@@ -880,6 +883,10 @@ async function handleComboChatInner({
       hiddenModelsByProvider,
       preContentTransportRecovery: resilienceSettings.streamRecovery.enabled === true,
       signal,
+      onContextOverflow: (model) => {
+        overflowExcludedModel = model;
+        if (effectiveSessionId) deleteSessionModelHistory(effectiveSessionId, combo.name);
+      },
     });
     if (pinnedDispatch) return pinnedDispatch;
   }
@@ -908,6 +915,7 @@ async function handleComboChatInner({
     sourceFormat,
     endpointPath,
     requestHeaders,
+    requestExcludedModel: overflowExcludedModel,
     runCombo: handleComboChat,
   });
   if (fusionDispatch) return fusionDispatch;
@@ -927,7 +935,9 @@ async function handleComboChatInner({
       allCombos,
       clampComboDepth(config.maxComboDepth),
       hiddenModelsByProvider
-    ).map((target) => target.modelStr),
+    )
+      .filter((target) => !overflowExcludedModel || target.modelStr !== overflowExcludedModel)
+      .map((target) => target.modelStr),
     comboName: combo.name,
     body,
     handleSingleModel: chaosHeaders?.handleSingleModel ?? handleSingleModelWithTimeout,
@@ -951,6 +961,7 @@ async function handleComboChatInner({
     handleSingleModelWithTimeout,
     log,
     hiddenModelsByProvider,
+    requestExcludedModel: overflowExcludedModel,
   });
   if (pipelineDispatch) return pipelineDispatch;
 
@@ -976,6 +987,7 @@ async function handleComboChatInner({
     sourceFormat,
     endpointPath,
     requestHeaders,
+    requestExcludedModel: overflowExcludedModel,
     runCombo: handleComboChat,
   });
   if (runtimeUnitDispatch) return runtimeUnitDispatch;
@@ -1011,6 +1023,8 @@ async function handleComboChatInner({
       relayOptions,
       perTargetAdmission,
       heldAttempt,
+      requestExcludedModel: overflowExcludedModel,
+      contextCacheSessionId: effectiveSessionId,
     });
     return resolveHeldTruncatedResponse(heldAttempt, roundRobinResponse);
   }
@@ -1038,6 +1052,7 @@ async function handleComboChatInner({
     handleSingleModelWithTimeout,
     buildAutoCandidates,
     hiddenModelsByProvider,
+    requestExcludedModel: overflowExcludedModel,
   });
   if ("earlyResponse" in targetResolution) return targetResolution.earlyResponse;
   const { stickyWeightedLimit, getWeightedStepKeyForTarget, preScreenMap, compatRejectedTargets } =

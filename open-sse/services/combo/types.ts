@@ -167,9 +167,13 @@ export type HandleComboChatOptions = {
   sourceFormat?: string | null;
   endpointPath?: string | null;
   requestHeaders?: Headers | Record<string, unknown> | null;
+  /** Provider/model rejected by this request's pin; no strategy path may select it again. */
+  requestExcludedModel?: string | null;
 };
 
 export type HandleRoundRobinOptions = HandleComboChatOptions & {
+  /** Same session key as the common context-cache pin read/write path. */
+  contextCacheSessionId?: string | null;
   /** The attempt round-robin moved on from; the caller resolves it against the final answer. */
   heldAttempt?: { heldTruncatedResponse?: Response | null };
 };
